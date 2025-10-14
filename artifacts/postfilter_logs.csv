@@ -1,0 +1,6 @@
+query,kprime_used,postfilter_passed,latency_ms,subset_size,returned
+Q1_high,200,3,6.8,3,3
+Q1_high,500,7,0.47,7,7
+Q1_high,1000,12,0.54,12,10
+Q2_medium,200,10,0.43,10,10
+Q3_low,200,110,0.4,110,10
