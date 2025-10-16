@@ -16,10 +16,11 @@
   "derived": {
     "RestaurantsPriceRange2": "from attributes.RestaurantsPriceRange2; nullable Int8; NA if missing"
   },
-  "id_range": "0..N-1 contiguous",
+  "id_range": "0..N-1 contiguous (per artifact)",
   "notes": [
     "Numeric columns use exact widths to meet spec: stars=float32, review_count=int32, RestaurantsPriceRange2=Int8 (nullable).",
     "state/city stored as pandas string dtype.",
-    "Artifacts are written as Parquet only (no CSV fallback in artifacts)."
+    "Artifacts are written as Parquet only (no CSV fallback in artifacts).",
+    "FULL = entire cleaned dataset; DEV = 10,000-row sample."
   ]
 }

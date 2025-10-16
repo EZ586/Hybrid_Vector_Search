@@ -1,8 +1,8 @@
 {
-  "N": 10000,
+  "N": 150346,
   "D": 384,
   "normalized": true,
   "model": "sentence-transformers/all-MiniLM-L6-v2",
-  "created_utc": "2025-10-14T16:43:20Z",
+  "created_utc": "2025-10-16T01:37:30Z",
   "seed": 42
 }
