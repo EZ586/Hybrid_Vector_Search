@@ -1,2 +1,0 @@
-{"qid": 1, "method": "random", "K": 10, "latency_ms": 1.7899219965329394, "recall_at_k": 0.0, "filter_selectivity": 1.0, "scored_vectors": 0, "timestamp_utc": "2025-10-19T19:43:54.756412+00:00"}
-{"qid": 1, "method": "random", "K": 10, "latency_ms": 0.23102200066205114, "recall_at_k": 0.0, "filter_selectivity": 1.0, "scored_vectors": 0, "timestamp_utc": "2025-10-19T20:08:37.465687+00:00"}

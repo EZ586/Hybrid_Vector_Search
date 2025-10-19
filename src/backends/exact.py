@@ -1,30 +1,27 @@
-# src/backends/random.py
 from __future__ import annotations
 from typing import Dict, Any
 import numpy as np
 from src.backend_interface import SearchBackend
 from src.utils.timing import time_ms
+from src.eval.oracle import brute_force
 
-class RandomBackend(SearchBackend):
-    name = "random"
+class ExactBackend(SearchBackend):
+    name = "exact"
 
     def search(self, qvec: np.ndarray, filters: Dict[str, Any], K: int) -> Dict[str, Any]:
+        allowed = np.arange(self.vectors.shape[0], dtype=np.int64)
         def _do():
-            N = self.vectors.shape[0]
-            K_eff = min(K, N)
-            rng = np.random.default_rng(0)
-            return rng.choice(N, size=K_eff, replace=False).tolist()
-
+            return brute_force(qvec, allowed, K)
         ids, latency_ms = time_ms(_do)
         return {
             "ids": ids,
             "stats": {
                 "latency_ms": float(latency_ms),
-                "scored_vectors": 0,
+                "scored_vectors": int(allowed.size),  # full scan
                 "lists_probed": None,
                 "nprobe": None,
                 "kth_at_stop": None,
                 "bound_at_stop": None,
-                "notes": "random baseline",
+                "notes": "oracle/ground-truth exact",
             },
         }
