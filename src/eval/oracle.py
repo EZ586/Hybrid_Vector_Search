@@ -10,6 +10,12 @@ print(f"Vector Path:\n{vector_path}")
 
 VECTORS: Optional[np.ndarray] = None
 
+def set_vectors(arr: np.ndarray):
+    global VECTORS
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32)
+    VECTORS = arr
+
 
 def load_vectors(version):
     """
@@ -31,13 +37,13 @@ def load_vectors(version):
 
 
 def brute_force(qvec, allowed_ids, K) -> list[int]:
-    # Loads vectors into global VECTOR variable
-    load_vectors("dev")
     # flatten qvec and allowed_ids into 1D array
     # ensures we are working with expected shape
     # converts into nparray if not already is nparray
     query = np.asarray(qvec, dtype=np.float32).reshape(-1)
-    allowed = np.asarray(allowed_ids).reshape(-1)
+    allowed = np.asarray(allowed_ids, dtype=np.int64).reshape(-1)
+    if allowed.size == 0 or K <= 0:
+        return []
     # considers case where K value set to be larger than available vectors
     K_val = min(K, allowed.size)
 
