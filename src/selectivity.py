@@ -33,6 +33,8 @@ Provides fraction of metadata rows that pass given filters
 def compute_selectivity(filters: dict, metadata: pd.DataFrame) -> float:
     if metadata.empty:
         return 0.0
+    if filters == {}:
+        return 1.0
     
     mask = pd.Series(True, index=metadata.index)
     # filter metadata by each key and their condition

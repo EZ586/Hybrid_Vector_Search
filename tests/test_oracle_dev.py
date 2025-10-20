@@ -34,4 +34,6 @@ for index, query in df_queries.iterrows():
     backend_ids = oracle_ids # set same for testing recall
     recall = compute_recall(backend_ids, oracle_ids, K)
     selectivity = compute_selectivity(filter, df_metadata)
-    print(f"Query: {index} | Recall@{K}={recall:.2f} | Selectivity:{selectivity}")
+    print(f"\nDF QUERY: \n{query}")
+    print(f"Query: {index} | Recall@{K}={recall:.2f} | Selectivity:{selectivity}\n")
+    print("-------------------------")
