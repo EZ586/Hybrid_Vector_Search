@@ -26,7 +26,7 @@ def load_vectors(version):
     """
     global VECTORS
     arr = []
-    if version == "dev":
+    if version == "full":
         arr = np.load(base_dir_path / "artifacts" / "dev" / "v1" / "vectors.npy")
     else:
         arr = np.load(base_dir_path / "artifacts" / "full" / "v1" / "vectors.npy")
