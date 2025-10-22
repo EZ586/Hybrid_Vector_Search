@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.backends.random import RandomBackend
 from src.backends.exact import ExactBackend
+from src.backends.prefilter_backend import PreFilterBackend
 from src.backend_interface import SearchBackend
 from src.logger import append_jsonl
 from src.eval.oracle import brute_force, load_vectors
@@ -33,6 +34,10 @@ def load_queries(version: str) -> pd.DataFrame:
     qpath = ARTIFACTS / version / "v1" / "queries.parquet"
     return pd.read_parquet(qpath)
 
+def load_metadata(version: str) -> pd.DataFrame:
+    mpath = ARTIFACTS / version / "v1" / "metadata.parquet"
+    return pd.read_parquet(mpath)
+
 def pick_vector_from_row(row: pd.Series) -> np.ndarray:
     for c in ("vector", "embedding", "qvec", "repr"):
         if c in row and row[c] is not None:
@@ -46,33 +51,35 @@ def compute_recall_at_k(pred_ids, oracle_ids, k: int) -> float:
     except Exception:
         return float(len(set(pred_ids[:k]).intersection(oracle_ids[:k])) / float(k))
 
-def get_backend(name: str, vectors: np.ndarray) -> SearchBackend:
+def get_backend(name: str, vectors: np.ndarray, metadata: pd.DataFrame) -> SearchBackend:
     registry = {
         "random": RandomBackend,
         "exact": ExactBackend,
+        "pre_filter": PreFilterBackend
         # later: "pre_filter": PreFilterBackend, "post_filter": PostFilterBackend, "hybrid": ...
     }
     if name not in registry:
         raise ValueError(f"Unknown backend '{name}'. Available: {list(registry)}")
-    return registry[name](vectors)
+    return registry[name](vectors, metadata, name)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default="dev", choices=["dev", "full"])
-    ap.add_argument("--backend", default="exact", choices=["exact", "random"])
+    ap.add_argument("--backend", default="exact", choices=["exact", "random","pre_filter"])
     ap.add_argument("--K", type=int, default=10)
     ap.add_argument("--max_queries", type=int, default=4)
     ap.add_argument("--out", default=str(RESULTS_DIR / "results_dev.jsonl"))
     args = ap.parse_args()
 
     vectors = load_vectors_npy(args.version)
+    metadata = load_metadata(args.version)
     load_vectors(args.version)  # init oracle globals
 
     qdf = load_queries(args.version)
     # take first N queries
     rows = qdf.head(args.max_queries)
-
-    backend = get_backend(args.backend, vectors)
+    print(type(metadata))
+    backend = get_backend(args.backend, vectors, metadata)
 
     # (dev) no filters; selectivity=1.0
     filters: Dict[str, Any] = {}
