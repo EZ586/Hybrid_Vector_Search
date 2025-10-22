@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Pre-Filter Backend",
+      "type": "python",
+      "request": "launch",
+      "module": "src.harness.run",
+      "args": [
+        "--version", "dev",
+        "--backend", "pre_filter",
+        "--K", "10"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

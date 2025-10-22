@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 path = str(Path(__file__).resolve().parents[1])
 sys.path.append(path)
 from src.selectivity import compute_selectivity, mask
-from src.eval.oracle import brute_force
+from src.eval.oracle import brute_force, load_vectors
 from src.eval.metrics import compute_recall
 
 base_dir_path = Path(__file__).resolve().parent.parent
@@ -18,6 +18,8 @@ queries_path = base_dir_path / "artifacts" / "dev" / "v1" / "queries.parquet"
 df_metadata = pd.read_parquet(metadata_path)
 df_queries = pd.read_parquet(queries_path)
 K = 10
+
+load_vectors("dev")
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -32,4 +34,6 @@ for index, query in df_queries.iterrows():
     backend_ids = oracle_ids # set same for testing recall
     recall = compute_recall(backend_ids, oracle_ids, K)
     selectivity = compute_selectivity(filter, df_metadata)
-    print(f"Query: {index} | Recall@{K}={recall:.2f} | Selectivity:{selectivity}")
+    print(f"\nDF QUERY: \n{query}")
+    print(f"Query: {index} | Recall@{K}={recall:.2f} | Selectivity:{selectivity}\n")
+    print("-------------------------")

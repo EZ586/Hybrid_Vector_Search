@@ -31,6 +31,9 @@ Provides fraction of metadata rows that pass given filters
 
 """
 def compute_selectivity(filters: dict, metadata: pd.DataFrame) -> float:
+    
+    if filters == {}:
+        return 1.0
     if metadata.empty:
         return 0.0
     
