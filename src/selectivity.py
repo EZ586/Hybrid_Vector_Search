@@ -56,9 +56,9 @@ def compute_selectivity(filters: dict, metadata: pd.DataFrame) -> float:
                 mask &= col.isin(val)
             elif op == "like":
                 mask &= col.astype(str).str.contains(val, case=False, na=False)
-        num_passed = mask.sum()
-        total = len(metadata)
-        return float(num_passed / total) if total > 0 else 0.0
+    num_passed = mask.sum()
+    total = len(metadata)
+    return float(num_passed / total) if total > 0 else 0.0
         
 
    

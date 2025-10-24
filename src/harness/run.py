@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
 import uuid
+import json
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from src.backend_interface import SearchBackend
 from src.logger import append_jsonl
 from src.eval.oracle import brute_force, load_vectors
 from src.eval import metrics as eval_metrics
+from src.selectivity import compute_selectivity
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = REPO_ROOT / "artifacts"
@@ -47,7 +49,7 @@ def pick_vector_from_row(row: pd.Series) -> np.ndarray:
 
 def compute_recall_at_k(pred_ids, oracle_ids, k: int) -> float:
     try:
-        return float(eval_metrics.recall_at_k(oracle_ids, pred_ids, k))
+        return float(eval_metrics.compute_recall(oracle_ids, pred_ids, k))
     except Exception:
         return float(len(set(pred_ids[:k]).intersection(oracle_ids[:k])) / float(k))
 
@@ -55,7 +57,8 @@ def get_backend(name: str, vectors: np.ndarray, metadata: pd.DataFrame) -> Searc
     registry = {
         "random": RandomBackend,
         "exact": ExactBackend,
-        "pre_filter": PreFilterBackend
+        "pre_filter": PreFilterBackend,
+
         # later: "pre_filter": PreFilterBackend, "post_filter": PostFilterBackend, "hybrid": ...
     }
     if name not in registry:
@@ -65,9 +68,9 @@ def get_backend(name: str, vectors: np.ndarray, metadata: pd.DataFrame) -> Searc
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default="dev", choices=["dev", "full"])
-    ap.add_argument("--backend", default="exact", choices=["exact", "random","pre_filter"])
+    ap.add_argument("--backend", default="exact", choices=["exact", "random","pre_filter","post_filter"])
     ap.add_argument("--K", type=int, default=10)
-    ap.add_argument("--max_queries", type=int, default=4)
+    ap.add_argument("--max_queries", type=int, default=5)
     ap.add_argument("--out", default=str(RESULTS_DIR / "results_dev.jsonl"))
     args = ap.parse_args()
 
@@ -78,18 +81,23 @@ def main() -> None:
     qdf = load_queries(args.version)
     # take first N queries
     rows = qdf.head(args.max_queries)
-    print(type(metadata))
     backend = get_backend(args.backend, vectors, metadata)
-
-    # (dev) no filters; selectivity=1.0
-    filters: Dict[str, Any] = {}
-    selectivity = 1.0
 
     for _, row in rows.iterrows():
         qid = int(row.get("qid", 0))
         qvec = pick_vector_from_row(row)
         if qvec is None:
             qvec = vectors[qid].astype(np.float32)
+        raw_filter = row.get("filters", {}) or {}
+        if isinstance(raw_filter, str):
+            try:
+                filters = json.loads(raw_filter)
+            except json.JSONDecodeError:
+                print(f"Warning: could not parse filter for qid={row.get('qid')}: {raw_filter}")
+                filters = {}
+        else:
+            filters = raw_filter
+        selectivity = compute_selectivity(filters, metadata)
 
         # Run backend
         result = backend.search(qvec, filters=filters, K=args.K)
@@ -97,6 +105,8 @@ def main() -> None:
         # Oracle for recall
         allowed = np.arange(vectors.shape[0], dtype=np.int64)
         oracle_ids = brute_force(qvec, allowed, args.K)
+        # print("result ids:",result["ids"])
+        # print("oracle ids:",oracle_ids)
         recall_at_k = compute_recall_at_k(result["ids"], oracle_ids, args.K)
 
         stats = result["stats"]
@@ -123,6 +133,6 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# Example run: python -m src.harness.run --version dev --backend random --K 10 \
-# --out results/week1_dev/results_dev.jsonl
+# Example run: python -m src.harness.run --version dev --backend pre_filter --K 10 \
+# --out results/week2_dev/results_dev.jsonl
 
