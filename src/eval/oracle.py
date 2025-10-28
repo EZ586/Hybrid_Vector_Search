@@ -5,9 +5,6 @@ from pathlib import Path
 base_dir_path = Path(__file__).resolve().parent.parent.parent
 print(f"Base path: \n{base_dir_path}")
 
-vector_path = base_dir_path / "artifacts" / "dev" / "v1"
-print(f"Vector Path:\n{vector_path}")
-
 VECTORS: Optional[np.ndarray] = None
 
 def set_vectors(arr: np.ndarray):
@@ -27,9 +24,9 @@ def load_vectors(version):
     global VECTORS
     arr = []
     if version == "full":
-        arr = np.load(base_dir_path / "artifacts" / "dev" / "v1" / "vectors.npy")
-    else:
         arr = np.load(base_dir_path / "artifacts" / "full" / "v1" / "vectors.npy")
+    else:
+        arr = np.load(base_dir_path / "artifacts" / "dev" / "v1" / "vectors.npy")
     # ensure that VECTOR has type float32
     if arr.dtype != np.float32:
         arr = arr.astype(np.float32)
