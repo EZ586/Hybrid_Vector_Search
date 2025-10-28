@@ -22,23 +22,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = REPO_ROOT / "artifacts"
 RESULTS_DIR = REPO_ROOT / "results" / "week1"
 
+
 def _coerce_vectors(arr) -> np.ndarray:
     if isinstance(arr, np.ndarray) and arr.dtype == object:
         arr = np.stack(arr, axis=0)
     return np.ascontiguousarray(arr.astype(np.float32))
+
 
 def load_vectors_npy(version: str) -> np.ndarray:
     vec_path = ARTIFACTS / version / "v1" / "vectors.npy"
     arr = np.load(vec_path)  # real file via git-lfs
     return _coerce_vectors(arr)
 
+
 def load_queries(version: str) -> pd.DataFrame:
     qpath = ARTIFACTS / version / "v1" / "queries.parquet"
     return pd.read_parquet(qpath)
 
+
 def load_metadata(version: str) -> pd.DataFrame:
     mpath = ARTIFACTS / version / "v1" / "metadata.parquet"
     return pd.read_parquet(mpath)
+
 
 def pick_vector_from_row(row: pd.Series) -> np.ndarray:
     for c in ("vector", "embedding", "qvec", "repr"):
@@ -47,32 +52,45 @@ def pick_vector_from_row(row: pd.Series) -> np.ndarray:
     # fallback: use id as index into vectors (dev-only smoke)
     return None
 
+
 def compute_recall_at_k(pred_ids, oracle_ids, k: int) -> float:
     try:
         return float(eval_metrics.compute_recall(oracle_ids, pred_ids, k))
     except Exception:
         return float(len(set(pred_ids[:k]).intersection(oracle_ids[:k])) / float(k))
 
-def get_backend(name: str, vectors: np.ndarray, metadata: pd.DataFrame) -> SearchBackend:
+
+def get_backend(
+    name: str, vectors: np.ndarray, metadata: pd.DataFrame
+) -> SearchBackend:
     registry = {
         "random": RandomBackend,
         "exact": ExactBackend,
         "pre_filter": PreFilterBackend,
-
         # later: "pre_filter": PreFilterBackend, "post_filter": PostFilterBackend, "hybrid": ...
     }
     if name not in registry:
         raise ValueError(f"Unknown backend '{name}'. Available: {list(registry)}")
     return registry[name](vectors, metadata, name)
 
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default="dev", choices=["dev", "full"])
-    ap.add_argument("--backend", default="exact", choices=["exact", "random","pre_filter","post_filter"])
+    ap.add_argument(
+        "--backend",
+        default="exact",
+        choices=["exact", "random", "pre_filter", "post_filter"],
+    )
     ap.add_argument("--K", type=int, default=10)
     ap.add_argument("--max_queries", type=int, default=5)
-    ap.add_argument("--out", default=str(RESULTS_DIR / "results_dev.jsonl"))
+    ap.add_argument("--out", default=None, help="Optional: override output path")
     args = ap.parse_args()
+
+    # Dynamically pick output filename based on version
+    if args.out is None:
+        out_name = f"results_{args.version}.jsonl"
+        args.out = str(RESULTS_DIR / out_name)
 
     vectors = load_vectors_npy(args.version)
     metadata = load_metadata(args.version)
@@ -93,7 +111,9 @@ def main() -> None:
             try:
                 filters = json.loads(raw_filter)
             except json.JSONDecodeError:
-                print(f"Warning: could not parse filter for qid={row.get('qid')}: {raw_filter}")
+                print(
+                    f"Warning: could not parse filter for qid={row.get('qid')}: {raw_filter}"
+                )
                 filters = {}
         else:
             filters = raw_filter
@@ -130,9 +150,9 @@ def main() -> None:
 
     print(f"Wrote {len(rows)} runs to {args.out}")
 
+
 if __name__ == "__main__":
     main()
 
 # Example run: python -m src.harness.run --version dev --backend pre_filter --K 10 \
 # --out results/week2_dev/results_dev.jsonl
-
