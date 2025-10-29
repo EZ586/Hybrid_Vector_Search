@@ -23,9 +23,9 @@ from typing import Tuple, List, Dict, Any, Iterable, Optional
 import numpy as np
 import pandas as pd
 
-from .backend_interface import SearchBackend
-from baselines.post_filter import post_filter_search
-from dataio.loaders import load_metadata, load_vectors_index
+from src.backend_interface import SearchBackend
+from src.baselines.post_filter import post_filter_search
+from src.dataio.loaders import load_metadata, load_vectors_index
 
 
 class PostFilterBackend(SearchBackend):

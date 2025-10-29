@@ -12,6 +12,7 @@ import pandas as pd
 from src.backends.random import RandomBackend
 from src.backends.exact import ExactBackend
 from src.backends.prefilter_backend import PreFilterBackend
+from src.backends.post_filter_backend import PostFilterBackend
 from src.backend_interface import SearchBackend
 from src.logger import append_jsonl
 from src.eval.oracle import brute_force, load_vectors
@@ -61,17 +62,23 @@ def compute_recall_at_k(pred_ids, oracle_ids, k: int) -> float:
 
 
 def get_backend(
-    name: str, vectors: np.ndarray, metadata: pd.DataFrame
+    name: str, vectors: np.ndarray, metadata: pd.DataFrame, version: str
 ) -> SearchBackend:
     registry = {
         "random": RandomBackend,
         "exact": ExactBackend,
         "pre_filter": PreFilterBackend,
+        "post_filter": PostFilterBackend,
         # later: "pre_filter": PreFilterBackend, "post_filter": PostFilterBackend, "hybrid": ...
     }
     if name not in registry:
         raise ValueError(f"Unknown backend '{name}'. Available: {list(registry)}")
-    return registry[name](vectors, metadata, name)
+    if name == "post_filter":
+        # PostFilter loads its own data/index from artifacts
+        artifacts_version_dir = ARTIFACTS / version / "v1"
+        return registry[name](artifacts_version_dir)
+    else:
+        return registry[name](vectors, metadata, name)
 
 
 def main() -> None:
@@ -99,7 +106,7 @@ def main() -> None:
     qdf = load_queries(args.version)
     # take first N queries
     rows = qdf.head(args.max_queries)
-    backend = get_backend(args.backend, vectors, metadata)
+    backend = get_backend(args.backend, vectors, metadata, args.version)
 
     for _, row in rows.iterrows():
         qid = int(row.get("qid", 0))
@@ -127,9 +134,9 @@ def main() -> None:
         oracle_ids = brute_force(qvec, allowed, args.K)
         # print("result ids:",result["ids"])
         # print("oracle ids:",oracle_ids)
-        recall_at_k = compute_recall_at_k(result["ids"], oracle_ids, args.K)
+        recall_at_k = compute_recall_at_k(result[0], oracle_ids, args.K)
 
-        stats = result["stats"]
+        stats = result[1]
         row_out = {
             "run_id": str(uuid.uuid4()),
             "qid": qid,
