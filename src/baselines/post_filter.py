@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import time
 
-# ⬇️ Single source of truth for all validation & filter semantics
+# Single source of truth for all validation & filter semantics
 from src.dataio.validators import (
     ensure_unit_l2,
     validate_K,
