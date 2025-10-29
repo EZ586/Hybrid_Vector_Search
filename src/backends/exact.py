@@ -7,7 +7,7 @@ from src.backend_interface import SearchBackend
 from src.utils.timing import time_ms
 from src.eval import oracle as ORACLE
 
-# ✅ single source of truth for validation & filters
+# single source of truth for validation & filters
 from src.dataio.validators import (
     validate_K,
     ensure_unit_l2,
