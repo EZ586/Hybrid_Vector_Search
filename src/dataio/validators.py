@@ -79,8 +79,13 @@ def validate_metadata_table(metadata: pd.DataFrame) -> pd.DataFrame:
         if col not in metadata.columns:
             raise ValidationError(f"metadata missing required column '{col}'")
         got = _dtype_name(metadata[col])
-        if got != want:
-            raise ValidationError(f"metadata[{col}] dtype must be {want}, got {got}")
+        # if got != want:
+        #     raise ValidationError(f"metadata[{col}] dtype must be {want}, got {got}")
+        if got.lower() != want.lower():
+            # Special-case pandas nullable Int8
+            if not (got.lower() == "int8" or got == "Int8"):
+                raise ValidationError(f"metadata[{col}] dtype must be {want}, got {got}")
+
 
     # id column rules: non-null, unique, contiguous 0..N-1
     id_series = metadata["id"]

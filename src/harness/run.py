@@ -2,85 +2,92 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional, List
 import uuid
 import json
-
+import sys
 import numpy as np
 import pandas as pd
 
+# ---------------------------------------------------------------------
+# Project imports
+# ---------------------------------------------------------------------
 from src.backends.random import RandomBackend
 from src.backends.exact import ExactBackend
 from src.backends.prefilter_backend import PreFilterBackend
 from src.backends.post_filter_backend import PostFilterBackend
 from src.backend_interface import SearchBackend
 from src.logger import append_jsonl
-from src.eval.oracle import brute_force, load_vectors
+from src.eval.oracle import brute_force, load_vectors as oracle_load_vectors
 from src.eval import metrics as eval_metrics
-from src.selectivity import compute_selectivity
+from src.eval import oracle as ORACLE
 
+from src.dataio.loaders import (
+    load_vectors,
+    load_vectors_meta,
+    load_metadata,
+    load_vectors_index,
+)
+
+from src.dataio.validators import (
+    parse_filters,
+    validate_K,
+    ensure_unit_l2,
+    validate_filters_schema,
+    build_allowed_ids,
+    ValidationError,
+    FilterSpecError,
+)
+
+# ---------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = REPO_ROOT / "artifacts"
-RESULTS_DIR = REPO_ROOT / "results" / "week1"
+RESULTS_DIR = REPO_ROOT / "results"
 
-
-def _coerce_vectors(arr) -> np.ndarray:
-    if isinstance(arr, np.ndarray) and arr.dtype == object:
-        arr = np.stack(arr, axis=0)
-    return np.ascontiguousarray(arr.astype(np.float32))
-
-
-def load_vectors_npy(version: str) -> np.ndarray:
-    vec_path = ARTIFACTS / version / "v1" / "vectors.npy"
-    arr = np.load(vec_path)  # real file via git-lfs
-    return _coerce_vectors(arr)
-
-
-def load_queries(version: str) -> pd.DataFrame:
-    qpath = ARTIFACTS / version / "v1" / "queries.parquet"
-    return pd.read_parquet(qpath)
-
-
-def load_metadata(version: str) -> pd.DataFrame:
-    mpath = ARTIFACTS / version / "v1" / "metadata.parquet"
-    return pd.read_parquet(mpath)
-
-
-def pick_vector_from_row(row: pd.Series) -> np.ndarray:
-    for c in ("vector", "embedding", "qvec", "repr"):
-        if c in row and row[c] is not None:
-            return np.array(row[c], dtype=np.float32).reshape(-1)
-    # fallback: use id as index into vectors (dev-only smoke)
-    return None
-
-
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
 def compute_recall_at_k(pred_ids, oracle_ids, k: int) -> float:
     try:
         return float(eval_metrics.compute_recall(oracle_ids, pred_ids, k))
     except Exception:
-        return float(len(set(pred_ids[:k]).intersection(oracle_ids[:k])) / float(k))
+        inter = len(set(pred_ids[:k]).intersection(oracle_ids[:k]))
+        return float(inter / k)
 
 
-def get_backend(
-    name: str, vectors: np.ndarray, metadata: pd.DataFrame, version: str
-) -> SearchBackend:
+def pick_vector_from_row(row: pd.Series) -> np.ndarray | None:
+    for c in ("vector", "embedding", "qvec", "repr"):
+        if c in row and row[c] is not None:
+            return np.array(row[c], dtype=np.float32).reshape(-1)
+    return None
+
+
+# ---------------------------------------------------------------------
+# Backend factory
+# ---------------------------------------------------------------------
+def get_backend(name: str, vectors: np.ndarray, metadata: pd.DataFrame, version: str) -> SearchBackend:
     registry = {
         "random": RandomBackend,
         "exact": ExactBackend,
         "pre_filter": PreFilterBackend,
         "post_filter": PostFilterBackend,
-        # later: "pre_filter": PreFilterBackend, "post_filter": PostFilterBackend, "hybrid": ...
     }
     if name not in registry:
         raise ValueError(f"Unknown backend '{name}'. Available: {list(registry)}")
+
     if name == "post_filter":
-        # PostFilter loads its own data/index from artifacts
-        artifacts_version_dir = ARTIFACTS / version / "v1"
-        return registry[name](artifacts_version_dir)
+        artifacts_dir = ARTIFACTS / version / "v1"
+        # # Example: if post-filter needs FAISS/HNSW index
+        # index = load_vectors_index(artifacts_dir, prefer_ivf=True)
+        return registry[name](artifacts_dir)
     else:
         return registry[name](vectors, metadata, name)
 
 
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default="dev", choices=["dev", "full"])
@@ -90,60 +97,73 @@ def main() -> None:
         choices=["exact", "random", "pre_filter", "post_filter"],
     )
     ap.add_argument("--K", type=int, default=10)
-    ap.add_argument("--max_queries", type=int, default=5)
+    ap.add_argument("--max_queries", type=int, default=10)
     ap.add_argument("--out", default=None, help="Optional: override output path")
     args = ap.parse_args()
 
-    # Dynamically pick output filename based on version
-    if args.out is None:
-        out_name = f"results_{args.version}.jsonl"
-        args.out = str(RESULTS_DIR / out_name)
+    # -----------------------------------------------------------------
+    # Load vectors, metadata, and meta info using loaders.py
+    # -----------------------------------------------------------------
+    artifact_dir = ARTIFACTS / args.version / "v1"
+    vectors = load_vectors(artifact_dir)
+    metadata = load_metadata(artifact_dir)
+    meta_info = load_vectors_meta(artifact_dir)
 
-    vectors = load_vectors_npy(args.version)
-    metadata = load_metadata(args.version)
-    load_vectors(args.version)  # init oracle globals
+    # Initialize oracle (for recall ground truth)
+    oracle_load_vectors(args.version)
+    # diff = np.max(np.abs(vectors - ORACLE.VECTORS))
+    # print(f"Max diff between harness vectors and oracle vectors: {diff:.6f}")
 
-    qdf = load_queries(args.version)
-    # take first N queries
-    rows = qdf.head(args.max_queries)
+    # Load queries (kept local since it depends on course harness)
+    qpath = artifact_dir / "queries.parquet"
+    qdf = pd.read_parquet(qpath)
+    validate_K(args.K, len(vectors))
     backend = get_backend(args.backend, vectors, metadata, args.version)
 
+    # -----------------------------------------------------------------
+    # Prepare output folder per §9 Logging Contract
+    # -----------------------------------------------------------------
+    run_id = f"{args.version}_{args.backend}_{uuid.uuid4().hex[:8]}"
+    # out_dir = RESULTS_DIR / run_id
+    # out_dir.mkdir(parents=True, exist_ok=True)
+    # out_path = out_dir / "results.jsonl"
+    out_path = RESULTS_DIR / "results.jsonl"
+
+    # -----------------------------------------------------------------
+    # Run harness
+    # -----------------------------------------------------------------
+    rows = qdf.head(args.max_queries)
     for _, row in rows.iterrows():
-        qid = int(row.get("qid", 0))
-        qvec = pick_vector_from_row(row)
-        if qvec is None:
-            qvec = vectors[qid].astype(np.float32)
-        raw_filter = row.get("filters", {}) or {}
-        if isinstance(raw_filter, str):
-            try:
-                filters = json.loads(raw_filter)
-            except json.JSONDecodeError:
-                print(
-                    f"Warning: could not parse filter for qid={row.get('qid')}: {raw_filter}"
-                )
-                filters = {}
-        else:
-            filters = raw_filter
-        selectivity = compute_selectivity(filters, metadata)
+        qid = int(row["qid"])
+        qvec = pick_vector_from_row(row) or vectors[qid].astype(np.float32)
+        ensure_unit_l2(qvec)
+
+        # Strict filter parsing & schema validation
+        try:
+            filters = parse_filters(row.get("filters"))
+            validate_filters_schema(metadata, filters)
+        except (ValidationError, FilterSpecError) as e:
+            raise RuntimeError(f"Filter validation failed for qid={qid}: {e}")
+
+        allowed_ids = build_allowed_ids(metadata, filters)
+        selectivity = len(allowed_ids) / len(metadata)
 
         # Run backend
-        result = backend.search(qvec, filters=filters, K=args.K)
+        pred_ids, stats = backend.search(qvec, filters=filters, K=args.K)
 
-        # Oracle for recall
-        allowed = np.arange(vectors.shape[0], dtype=np.int64)
-        oracle_ids = brute_force(qvec, allowed, args.K)
-        # print("result ids:",result["ids"])
-        # print("oracle ids:",oracle_ids)
-        recall_at_k = compute_recall_at_k(result[0], oracle_ids, args.K)
+        # Oracle recall
+        oracle_ids = brute_force(qvec, allowed_ids, args.K)
+        recall_at_k = compute_recall_at_k(pred_ids, oracle_ids, args.K)
 
-        stats = result[1]
+        # -----------------------------------------------------------------
+        # Log in required field order (§9)
+        # -----------------------------------------------------------------
         row_out = {
-            "run_id": str(uuid.uuid4()),
             "qid": qid,
             "method": backend.name,
             "K": int(args.K),
             "latency_ms": float(stats.get("latency_ms", 0.0)),
-            "recall@K": float(recall_at_k),
+            "recall_at_k": float(recall_at_k),
             "filter_selectivity": float(selectivity),
             "scored_vectors": int(stats.get("scored_vectors", 0)),
             "lists_probed": stats.get("lists_probed"),
@@ -152,14 +172,17 @@ def main() -> None:
             "bound_at_stop": stats.get("bound_at_stop"),
             "notes": stats.get("notes"),
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
         }
-        append_jsonl(row_out, Path(args.out))
 
-    print(f"Wrote {len(rows)} runs to {args.out}")
+        append_jsonl(row_out, out_path)
+
+    print(f"Wrote {len(rows)} runs to {out_path}")
 
 
 if __name__ == "__main__":
-    main()
-
-# Example run: python -m src.harness.run --version dev --backend pre_filter --K 10 \
-# --out results/week2_dev/results_dev.jsonl
+    try:
+        main()
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
