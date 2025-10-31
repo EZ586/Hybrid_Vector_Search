@@ -7,6 +7,8 @@ import json
 import sys
 import numpy as np
 import pandas as pd
+from sentence_transformers import SentenceTransformer
+import os
 
 # ---------------------------------------------------------------------
 # Project imports
@@ -120,6 +122,24 @@ def main() -> None:
     validate_K(args.K, len(vectors))
     backend = get_backend(args.backend, vectors, metadata, args.version)
 
+
+    # --- Load vectors meta ---
+    with open(os.path.join(artifact_dir, "vectors.meta.json")) as f:
+        meta = json.load(f)
+    model_name = meta["model"]
+
+    # --- Initialize on-the-fly embedder ---
+    from sentence_transformers import SentenceTransformer
+    embedder = SentenceTransformer(model_name)
+
+    # --- Load queries and embed on the fly ---
+    queries_df = pd.read_parquet(os.path.join(artifact_dir, "queries.parquet"))
+    qtexts = queries_df["qtext"].tolist()
+    print(f"Embedding {len(qtexts)} queries using {model_name}...")
+    qvecs = embedder.encode(qtexts, convert_to_numpy=True, normalize_embeddings=True).astype(np.float32)
+    assert qvecs.shape[1] == meta["D"], f"Query dim {qvecs.shape[1]} != vector dim {meta['D']}"
+    print("On-the-fly embedding completed.")
+
     # -----------------------------------------------------------------
     # Prepare output folder per §9 Logging Contract
     # -----------------------------------------------------------------
@@ -133,9 +153,10 @@ def main() -> None:
     # Run harness
     # -----------------------------------------------------------------
     rows = qdf.head(args.max_queries)
-    for _, row in rows.iterrows():
+    for i, row in rows.iterrows():
         qid = int(row["qid"])
-        qvec = pick_vector_from_row(row) or vectors[qid].astype(np.float32)
+        # qvec = pick_vector_from_row(row) or vectors[qid].astype(np.float32)
+        qvec = qvecs[i]
         ensure_unit_l2(qvec)
 
         # Strict filter parsing & schema validation
