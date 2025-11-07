@@ -24,7 +24,16 @@ def build_ivf_index(
         Trained and populated faiss.IndexIVFFlat.
     """
     # TODO: create quantizer, index, train, add, and optionally write_index
-    raise NotImplementedError
+    dim = vectors.shape[1]
+    quantizer = faiss.IndexFlatIP(dim) if metric == "ip" else faiss.IndexFlatL2(dim)
+    index = faiss.IndexIVFFlat(quantizer, dim, nlist,faiss.METRIC_INNER_PRODUCT if metric == "ip" else faiss.METRIC_L2)
+    index.train(vectors)
+    ids = np.arange(vectors.shape[0])
+    index.add_with_ids(vectors, ids)
+    if save_path:
+        faiss.write_index(index, save_path)
+    return index
+
 
 
 def load_ivf_index(path: str) -> faiss.IndexIVFFlat:
@@ -38,4 +47,4 @@ def load_ivf_index(path: str) -> faiss.IndexIVFFlat:
         faiss.IndexIVFFlat instance.
     """
     # TODO: return faiss.read_index(path)
-    raise NotImplementedError
+    return faiss.read_index(path)

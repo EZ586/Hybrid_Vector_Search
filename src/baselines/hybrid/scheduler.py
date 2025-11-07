@@ -15,4 +15,7 @@ def linear_nprobe_scheduler(
         int: next nprobe value to try.
     """
     # TODO: yield start, start+step, ... capped at max_nprobe
-    raise NotImplementedError
+    n = start 
+    while n <= max_nprobe:
+        yield n
+        n += step
