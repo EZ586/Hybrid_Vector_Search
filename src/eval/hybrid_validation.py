@@ -33,4 +33,29 @@ def validate_hybrid_results(
           - num_allow: int
     """
     # TODO: implement subset check and metrics
-    raise NotImplementedError
+    # Defensive conversion to NumPy for fast set operations
+    hybrid_ids = np.asarray(hybrid_ids, dtype=np.int64)
+    oracle_ids = np.asarray(oracle_ids, dtype=np.int64)
+    allow_ids = np.asarray(allow_ids, dtype=np.int64)
+
+    # check all hybrid_ids are subset of allow_ids
+    allow_set = set(allow_ids.tolist())
+    is_subset = all(hid in allow_set for hid in hybrid_ids)
+
+    # compute recall@K vs oracle
+    topk_oracle = oracle_ids[:K] if len(oracle_ids) >= K else oracle_ids
+    hits = len(set(hybrid_ids) & set(topk_oracle))
+    recall_at_k = hits / len(topk_oracle) if len(topk_oracle) > 0 else 0.0
+
+    # compute filter_selectivity = len(allow_ids) / total_N
+    filter_selectivity = (
+        len(allow_ids) / total_N if total_N > 0 else float("nan")
+    )
+
+    return {
+        "is_subset": is_subset,
+        "recall_at_k": recall_at_k,
+        "filter_selectivity": filter_selectivity,
+        "num_hybrid": len(hybrid_ids),
+        "num_allow": len(allow_ids),
+    }

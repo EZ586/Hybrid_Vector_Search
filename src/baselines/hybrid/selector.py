@@ -20,26 +20,73 @@ def make_allowlist(metadata_df: pd.DataFrame, filters: Dict[str, Any]) -> np.nda
         allow_ids: 1D numpy array of integer IDs (e.g. int64) allowed by filters.
     """
     # TODO: apply filters over metadata_df
-    mask = np.ones(len(metadata_df), dtype=bool)
-    for key, condition in filters.items():
-        col = metadata_df[key]
+    if not filters:
+        return metadata_df["id"].to_numpy(dtype=np.int64)
 
-        for op, val in condition.items():
+    mask = pd.Series(True, index=metadata_df.index)
+
+    geo_lat, geo_lon = None, None
+
+    for col, ops in filters.items():
+        if col in {"lat_between", "lon_between"}:
+            if col == "lat_between":
+                geo_lat = tuple(ops)
+            else:
+                geo_lon = tuple(ops)
+            continue
+
+        s = metadata_df[col]
+        cur = pd.Series(True, index=s.index)
+
+        for op, val in ops.items():
             if op == "eq":
-                mask &= col == val
+                m = s == val
+            elif op == "ne":
+                m = s != val
             elif op == "ge":
-                mask &= col >= val
+                m = s >= val
             elif op == "le":
-                mask &= col <= val
+                m = s <= val
+            elif op == "gt":
+                m = s > val
+            elif op == "lt":
+                m = s < val
             elif op == "between":
-                low, high = val
-                mask &= col.between(low, high, inclusive="both")
+                if not isinstance(val, (list, tuple)) or len(val) != 2:
+                    raise ValueError(f"'between' expects [lo, hi] for '{col}'")
+                lo, hi = val
+                m = s.between(lo, hi, inclusive="both")
             elif op == "in":
-                mask &= col.isin(val)
-            elif op == "like":
-                mask &= col.astype(str).str.contains(val, case=False, na=False)
-    return metadata_df.loc[mask, "id"].astype(np.int64).to_numpy()
-        
+                if not isinstance(val, (list, tuple, set)):
+                    raise ValueError(f"'in' expects list/tuple/set for '{col}'")
+                m = s.isin(val)
+            else:
+                raise ValueError(f"Unsupported operator '{op}' in filter for column '{col}'")
+
+            # Missing values fail predicate
+            m &= s.notna()
+            cur &= m
+
+        mask &= cur
+
+    # Apply combined geo mask if both lat/lon present
+    if (geo_lat is not None) or (geo_lon is not None):
+        if geo_lat is None or geo_lon is None:
+            raise ValueError("Geo filters require both 'lat_between' and 'lon_between'")
+        if "latitude" not in metadata_df.columns or "longitude" not in metadata_df.columns:
+            raise ValueError("Geo filters require 'latitude' and 'longitude' columns")
+
+        s_lat = metadata_df["latitude"]
+        s_lon = metadata_df["longitude"]
+
+        lat_mask = s_lat.between(geo_lat[0], geo_lat[1], inclusive="both")
+        lon_mask = s_lon.between(geo_lon[0], geo_lon[1], inclusive="both")
+        geo_mask = lat_mask & lon_mask & s_lat.notna() & s_lon.notna()
+        mask &= geo_mask
+
+    allow_ids = metadata_df.loc[mask, "id"].to_numpy(dtype=np.int64)
+    return allow_ids
+
 
 
 def build_idselector(allow_ids: np.ndarray) -> faiss.IDSelectorBatch:
