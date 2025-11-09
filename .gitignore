@@ -1,3 +1,10 @@
 dataset
 .vscode
+__pycache__/artifacts/v1/vectors.npy
+results/indexes/
+artifacts/v1/vectors.npy
+results/indexes/
+.DS_Store
+__pycache__/
+.DS_Store
 __pycache__/

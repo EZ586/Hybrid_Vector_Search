@@ -59,6 +59,3 @@ def compute_selectivity(filters: dict, metadata: pd.DataFrame) -> float:
     num_passed = mask.sum()
     total = len(metadata)
     return float(num_passed / total) if total > 0 else 0.0
-        
-
-   

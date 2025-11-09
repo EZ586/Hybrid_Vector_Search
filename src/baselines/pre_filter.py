@@ -1,7 +1,7 @@
 import time
 import numpy as np
 import pandas as pd
-from src.selectivity import mask
+from src.eval.selectivity import mask
 
 
 def pre_filter_search(

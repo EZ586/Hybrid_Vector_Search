@@ -8,16 +8,14 @@ from typing import Optional
 FILE = "data/yelp_academic_dataset_business.json"
 SEED = 42
 ART = "artifacts"
-DEV = f"{ART}/dev/v1"
-FULL = f"{ART}/full/v1"
-DEV_N = 10_000
+BUCKET = f"{ART}/v1"            
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # 384-D
 
 # Required / optional columns (metadata schema)
 MUST = ["state","city","stars","review_count","RestaurantsPriceRange2"]
 OPT  = ["categories","latitude","longitude","is_open"]
 
-os.makedirs(DEV, exist_ok=True); os.makedirs(FULL, exist_ok=True)
+os.makedirs(BUCKET, exist_ok=True)
 
 # ---------- Helpers ----------
 def extract_price(attr_val):
@@ -83,7 +81,7 @@ def build_metadata_artifacts(src_json: str = FILE):
     if "categories" in meta:
         meta["categories"] = meta["categories"].astype("string")
 
-    # Non-nulls on required before split
+    # Non-nulls on required before finalization
     meta = meta.dropna(subset=["state","stars","review_count"]).copy()
     meta["review_count"] = meta["review_count"].astype("int32")
 
@@ -94,21 +92,13 @@ def build_metadata_artifacts(src_json: str = FILE):
     if len(meta) == 0:
         raise ValueError("No rows remain after cleaning.")
 
-    # FULL
-    meta_full = meta.reset_index(drop=True).copy()
-    meta_full.insert(0, "id", np.arange(len(meta_full), dtype=np.int64))
-    meta_full.drop(columns=["name"], errors="ignore", inplace=True)
-    validate_schema(meta_full)
+    # Single bucket
+    meta_final = meta.reset_index(drop=True).copy()
+    meta_final.insert(0, "id", np.arange(len(meta_final), dtype=np.int64))
+    meta_final.drop(columns=["name"], errors="ignore", inplace=True)
+    validate_schema(meta_final)
 
-    # DEV
-    if len(meta_full) < DEV_N:
-        raise ValueError(f"Need at least {DEV_N} rows for dev; have {len(meta_full)}.")
-    meta_dev = meta_full.sample(n=DEV_N, random_state=SEED).reset_index(drop=True).copy()
-    meta_dev["id"] = np.arange(len(meta_dev), dtype=np.int64)
-    validate_schema(meta_dev)
-
-    meta_full.to_parquet(f"{FULL}/metadata.parquet", index=False, engine="pyarrow")
-    meta_dev.to_parquet(f"{DEV}/metadata.parquet",  index=False, engine="pyarrow")
+    meta_final.to_parquet(f"{BUCKET}/metadata.parquet", index=False, engine="pyarrow")
 
     schema = {
       "must_have": ["id","state","city","stars","review_count","RestaurantsPriceRange2"],
@@ -119,13 +109,13 @@ def build_metadata_artifacts(src_json: str = FILE):
         "Numeric columns use exact widths: stars=float32, review_count=int32, RestaurantsPriceRange2=Int8 (nullable).",
         "state/city are pandas string dtype.",
         "Artifacts are Parquet only.",
-        "FULL = entire cleaned dataset; DEV = 10,000-row sample."
+        "Single bucket layout: artifacts/v1/"
       ]
     }
     with open(f"{ART}/metadata.schema.json","w") as f:
         json.dump(schema, f, indent=2)
 
-    print(f"Done: wrote FULL (N={len(meta_full)}) and DEV (N={len(meta_dev)}) metadata + schema.")
+    print(f"Done: wrote SINGLE bucket (N={len(meta_final)}) metadata + schema at {BUCKET}")
 
 # ---------- Helpers ----------
 def read_parquet_strict(path: str) -> pd.DataFrame:
@@ -180,6 +170,7 @@ def embed_and_save(meta_path: str, bucket_dir: str, seed=SEED, model_name=MODEL_
     if vecs.shape[0] != len(m):
         raise AssertionError("N in vectors must equal number of metadata rows.")
 
+    os.makedirs(bucket_dir, exist_ok=True)
     np.save(os.path.join(bucket_dir, "vectors.npy"), vecs)
     meta = {
         "N": int(vecs.shape[0]),
@@ -251,7 +242,7 @@ def sanity_check_bucket(bucket_dir: str, qids_to_test=(1,2,4,7,10)):
 # ---------- CLI ----------
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="Yelp metadata → embeddings pipeline")
+    p = argparse.ArgumentParser(description="Yelp metadata → embeddings pipeline (single-bucket)")
     p.add_argument("--stage", choices=["meta","embed","queries","sanity","all"], default="all")
     p.add_argument("--src", default=FILE, help="Path to Yelp JSON (for --stage meta)")
     args = p.parse_args()
@@ -260,14 +251,12 @@ if __name__ == "__main__":
         build_metadata_artifacts(src_json=args.src)
 
     if args.stage in ("embed","all"):
-        embed_and_save(os.path.join(FULL, "metadata.parquet"), FULL, seed=SEED, model_name=MODEL_NAME)
-        embed_and_save(os.path.join(DEV,  "metadata.parquet"), DEV,  seed=SEED, model_name=MODEL_NAME)
+        embed_and_save(os.path.join(BUCKET, "metadata.parquet"), BUCKET, seed=SEED, model_name=MODEL_NAME)
 
     if args.stage in ("queries","all"):
-        write_queries(FULL)
-        write_queries(DEV)
+        write_queries(BUCKET)
 
     if args.stage in ("sanity","all"):
-        sanity_check_bucket(DEV, qids_to_test=(1,2,4,7,10))
+        sanity_check_bucket(BUCKET, qids_to_test=(1,2,4,7,10))
 
     print("Pipeline complete.")

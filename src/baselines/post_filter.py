@@ -1,3 +1,4 @@
+
 # src/backends/post_filter.py
 from __future__ import annotations
 from typing import Iterable, Tuple, Dict, List, Any, Mapping, Optional
@@ -38,6 +39,7 @@ def post_filter_search(
       - kth_at_stop (Optional[float])
       - bound_at_stop (None)
     """
+    t0 = time.time()
     # Basic safety/shape constraints
     if not isinstance(metadata_df.index, pd.Index) or metadata_df.index.name != "id":
         if "id" not in metadata_df.columns:
@@ -55,7 +57,6 @@ def post_filter_search(
     if max_ladder_steps is None:
         max_ladder_steps = len(tuple(k_ladder))
 
-    t0 = time.time()
     last_kprime_used = 0  # for spec-compliant scored_vectors
     kept: Dict[int, float] = {}
     retries = 0

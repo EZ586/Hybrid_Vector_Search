@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from src.eval.oracle import load_vectors
 from src.baselines.pre_filter import pre_filter_search
-from src.backend_interface import SearchBackend
+from src.backends.backend_interface import SearchBackend
 
 
 """

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, Tuple, List
 import numpy as np
 
-from src.backend_interface import SearchBackend
+from src.backends.backend_interface import SearchBackend
 from src.utils.timing import time_ms
 from src.eval import oracle as ORACLE
 
