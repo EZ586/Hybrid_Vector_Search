@@ -69,6 +69,7 @@ def build_ivf_index(
 
     # choose metric
     if metric == "ip":
+        faiss.normalize_L2(vectors)
         quantizer = faiss.IndexFlatIP(d)
         faiss_metric = faiss.METRIC_INNER_PRODUCT
     elif metric == "l2":
@@ -164,3 +165,75 @@ __all__ = [
     "DEFAULT_INDEX_PATH",
     "DEFAULT_FULL_INDEX_PATH",  
 ]
+
+# ---------------------------------------------------------------------
+# CLI entrypoint: allow building an index directly from terminal
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    import argparse
+    from datetime import datetime
+
+    parser = argparse.ArgumentParser(description="Build a FAISS IVF index from artifacts.")
+    parser.add_argument(
+        "--artifacts",
+        type=str,
+        default="/artifacts",
+        help="Base artifacts directory (default: /artifacts)",
+    )
+    parser.add_argument(
+        "--bucket",
+        type=str,
+        default="v2",
+        help="Subfolder (bucket) name within artifacts, e.g. v1 or v2 (default: v2)",
+    )
+    parser.add_argument(
+        "--nlist",
+        type=int,
+        default=1024,
+        help="Number of IVF lists (default: 1024)",
+    )
+    parser.add_argument(
+        "--metric",
+        type=str,
+        choices=["ip", "l2"],
+        default="ip",
+        help="Distance metric to use for FAISS index (default: ip)",
+    )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default=None,
+        help="Optional path to save index file (default: results/indexes/faiss_ivf.index)",
+    )
+
+    args = parser.parse_args()
+
+    print("Building FAISS IVF index...")
+    print(f"  Artifacts dir : {args.artifacts}")
+    print(f"  Bucket        : {args.bucket}")
+    print(f"  nlist         : {args.nlist}")
+    print(f"  Metric        : {args.metric}")
+
+    try:
+        index = build_ivf_index_from_artifacts(
+            artifacts_root=args.artifacts,
+            bucket=args.bucket,
+            nlist=args.nlist,
+            metric=args.metric,
+            save_path=args.save,
+        )
+        print(f"✅ Index built successfully!")
+        print(f"   Index type  : {type(index)}")
+        print(f"   nlist       : {index.nlist}")
+        print(f"   ntotal      : {index.ntotal}")
+        print(f"   dimension   : {index.d}")
+
+        # write to disk if not already saved
+        out_path = args.save or DEFAULT_INDEX_PATH
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        print(f"📦 Saved index → {out_path}  (built {timestamp})")
+
+    except Exception as e:
+        import traceback
+        print(f"❌ Failed to build index ({type(e).__name__}): {e}")
+        traceback.print_exc()

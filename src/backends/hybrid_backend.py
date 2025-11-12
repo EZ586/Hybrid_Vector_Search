@@ -9,12 +9,17 @@ import faiss
 
 from src.baselines.hybrid.index import (
     load_ivf_index,
-    DEFAULT_INDEX_PATH,       # new default
+    DEFAULT_INDEX_PATH,  # new default
     DEFAULT_FULL_INDEX_PATH,  # backward compat
 )
 from src.baselines.hybrid.search import hybrid_search
 from src.baselines.hybrid.selector import make_allowlist
 from src.baselines.hybrid.scheduler import linear_nprobe_scheduler
+
+from src.dataio.validators import (
+    build_allowed_ids,
+)
+
 
 from src.dataio.loaders import load_metadata
 
@@ -41,7 +46,9 @@ class HybridBackend(SearchBackend):
     def __init__(
         self,
         index_path: str = DEFAULT_INDEX_PATH,
-        metadata_dir: str = os.path.join(DEFAULT_METADATA_ROOT, DEFAULT_METADATA_BUCKET),
+        metadata_dir: str = os.path.join(
+            DEFAULT_METADATA_ROOT, DEFAULT_METADATA_BUCKET
+        ),
         nprobe_start: int = 4,
         nprobe_step: int = 4,
         nprobe_max: int = 64,
@@ -100,7 +107,7 @@ class HybridBackend(SearchBackend):
         if not filters:
             allow_ids = self._all_ids
         else:
-            allow_ids = make_allowlist(self.metadata_df, filters)
+            allow_ids = build_allowed_ids(self.metadata_df, filters)
             # safety: if filter is too tight, run anyway and let search report zero
             if allow_ids.size == 0:
                 allow_ids = np.empty((0,), dtype=np.int64)
@@ -112,6 +119,34 @@ class HybridBackend(SearchBackend):
             max_nprobe=self._nprobe_max,
         )
 
+        # compute centroids if available
+        centroids = None
+        allowed_counts = None
+
+        if hasattr(self.index, "quantizer"):
+            try:
+                centroids = faiss.vector_float_to_array(
+                    self.index.quantizer.reconstruct_n(0, self.index.nlist)
+                )
+                centroids = centroids.reshape(self.index.nlist, self.index.d)
+            except Exception as e:
+                print(f"[WARN] Could not extract centroids ({type(e).__name__}): {e}")
+
+
+        if hasattr(self.index, "invlists"):
+            try:
+                nlist = self.index.nlist
+                allowed_counts = np.zeros(nlist, dtype=np.int32)
+                for lid in range(nlist):
+                    ids = faiss.rev_swig_ptr(
+                        self.index.invlists.list_ids(lid),
+                        self.index.invlists.list_size(lid),
+                    )
+                    allowed_counts[lid] = np.isin(ids, allow_ids).sum()
+            except Exception as e:
+                print(f"[WARN] Could not compute allowed_counts ({type(e).__name__}): {e}")
+
+
         # 3) run the predicate-aware ANN loop
         ids, stats = hybrid_search(
             qvec=qvec,
@@ -119,6 +154,8 @@ class HybridBackend(SearchBackend):
             allow_ids=allow_ids,
             K=K,
             nprobe_iter=nprobe_iter,
+            centroids=centroids,
+            allowed_counts_per_list=allowed_counts,
         )
 
         # 4) make sure harness can rely on length K

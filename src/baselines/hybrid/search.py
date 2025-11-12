@@ -2,9 +2,10 @@
 
 from typing import Iterable, Tuple, List, Dict, Any
 import time
-
 import numpy as np
 import faiss
+
+from src.baselines.hybrid.list_ordering import build_probe_order
 
 
 def hybrid_search(
@@ -13,6 +14,8 @@ def hybrid_search(
     allow_ids: np.ndarray,
     K: int,
     nprobe_iter: Iterable[int],
+    centroids: np.ndarray | None = None,
+    allowed_counts_per_list: np.ndarray | None = None,
 ) -> Tuple[List[int], Dict[str, Any]]:
     """
     Predicate-aware ANN loop using FAISS IVF + IDSelectorBatch.
@@ -68,11 +71,28 @@ def hybrid_search(
     oversample_factor = 10
     search_k = max(K * oversample_factor, K)
 
+    probe_order = None
+    if centroids is not None:
+        try:
+            probe_order = build_probe_order(
+                qvec.squeeze(0), centroids, allowed_counts_per_list
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to compute custom probe order: {e}")
+
     for nprobe in nprobe_iter:
         lists_probed += 1
         last_nprobe = nprobe
         index.nprobe = nprobe
+        params.nprobe = nprobe
 
+        # optionally reorder probe lists in FAISS
+        if probe_order is not None and hasattr(index, "set_probe_order"):
+            try:
+                index.set_probe_order(np.array(probe_order, dtype=np.int64))
+            except Exception:
+                pass  # FAISS CPU bindings don’t always expose set_probe_order
+        
         # search with selector enforced
         D, I = index.search(qvec, search_k, params=params)
 
@@ -92,8 +112,8 @@ def hybrid_search(
                 candidates[idx] = dist
 
         # stop if we already have enough
-        if len(candidates) >= K:
-            break
+        # if len(candidates) >= K:
+        #     break
 
     # sort candidates by score desc (FAISS IP = larger is better)
     sorted_items = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
