@@ -4,8 +4,94 @@ from typing import Iterable, Tuple, List, Dict, Any
 import time
 import numpy as np
 import faiss
+import heapq
 
 from src.baselines.hybrid.list_ordering import build_probe_order
+
+def manual_ivf_traversal(
+    qvec: np.ndarray,
+    index: faiss.IndexIVFFlat,
+    allow_ids: np.ndarray,
+    K: int,
+    probe_order: np.ndarray,
+    nprobe: int,
+) -> Tuple[List[int], List[float]]:
+    """
+    Perform manual IVF traversal using the provided probe order.
+    Returns (ids, scores) for the top K results.
+    """
+    qvec = np.asarray(qvec, dtype=np.float32).ravel()
+    allow_ids_set = set(int(i) for i in allow_ids)
+    invlists = index.invlists
+    d = index.d
+    is_ip = (index.metric_type == faiss.METRIC_INNER_PRODUCT)
+    heap: List[Tuple[float, int]] = []
+
+    total_scanned = 0
+    probe_subset = probe_order[:min(nprobe, len(probe_order))]
+
+    for lid in probe_subset:
+        lid = int(lid)
+        try:
+            size = invlists.list_size(int(lid))
+        except Exception:
+            continue
+        if size == 0:
+            continue
+
+        # --- Retrieve IDs for this list ---
+        ids_ptr = invlists.get_ids(lid)
+        ids = faiss.rev_swig_ptr(ids_ptr, size)
+
+        # Filter by metadata allow-list
+        mask = np.fromiter((i in allow_ids_set for i in ids), dtype=bool)
+        if not np.any(mask):
+            continue
+
+        ids = ids[mask]
+
+        # --- Reconstruct actual vectors from direct map ---
+        try:
+            vecs = np.vstack([index.reconstruct(int(i)) for i in ids])
+        except Exception as e:
+            print(f"[WARN] Failed to reconstruct vectors for list {lid} ({type(e).__name__}): {e}")
+            continue
+
+        total_scanned += len(ids)
+
+        # --- Compute similarity or distance ---
+        if is_ip:
+            scores = vecs @ qvec
+        else:
+            diffs = vecs - qvec
+            scores = -np.einsum("ij,ij->i", diffs, diffs)  # negative L2
+
+        # --- Merge into heap (keep top K) ---
+        for idx, s in zip(ids, scores):
+            if len(heap) < K:
+                heapq.heappush(heap, (s, idx))
+            else:
+                if is_ip and s > heap[0][0]:
+                    heapq.heappushpop(heap, (s, idx))
+                elif not is_ip and s < heap[0][0]:
+                    heapq.heappushpop(heap, (s, idx))
+
+    # --- Final sort ---
+    if is_ip:
+        heap.sort(key=lambda x: x[0], reverse=True)
+    else:
+        heap.sort(key=lambda x: x[0])
+
+    if heap:
+        scores, ids = zip(*heap)
+    else:
+        scores, ids = [], []
+
+    # print(f"[SUMMARY] Total lists visited: {len(probe_subset)}")
+    # print(f"[SUMMARY] Total vectors scanned: {total_scanned}")
+    # print(f"[SUMMARY] Final heap size: {len(heap)}")
+
+    return list(ids), list(scores)
 
 
 def hybrid_search(
@@ -86,19 +172,24 @@ def hybrid_search(
         index.nprobe = nprobe
         params.nprobe = nprobe
 
-        # optionally reorder probe lists in FAISS
-        if probe_order is not None and hasattr(index, "set_probe_order"):
+        if probe_order is not None:
             try:
-                index.set_probe_order(np.array(probe_order, dtype=np.int64))
-            except Exception:
-                pass  # FAISS CPU bindings don’t always expose set_probe_order
-        
-        # search with selector enforced
-        D, I = index.search(qvec, search_k, params=params)
+                returned_ids, returned_dists = manual_ivf_traversal(
+                    qvec.squeeze(0), index, allow_ids, K * oversample_factor, probe_order, nprobe
+                )
+                returned_ids = np.array(returned_ids)
+                returned_dists = np.array(returned_dists)
+            except Exception as e:
+                print(f"[WARN] manual_ivf_traversal failed, fallback to FAISS ({type(e).__name__}): {e}")
+                D, I = index.search(qvec, search_k, params=params)
+                returned_dists, returned_ids = D[0], I[0]
+        else:
+            # --- fallback: FAISS search ---
+            D, I = index.search(qvec, search_k, params=params)
+            returned_dists, returned_ids = D[0], I[0]
 
         # count how many vectors FAISS actually returned (non -1)
-        returned_ids = I[0]
-        returned_dists = D[0]
+
         valid_mask = returned_ids != -1
         scored_vectors += int(valid_mask.sum())
 

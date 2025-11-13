@@ -121,30 +121,58 @@ class HybridBackend(SearchBackend):
 
         # compute centroids if available
         centroids = None
-        allowed_counts = None
-
         if hasattr(self.index, "quantizer"):
             try:
-                centroids = faiss.vector_float_to_array(
-                    self.index.quantizer.reconstruct_n(0, self.index.nlist)
-                )
-                centroids = centroids.reshape(self.index.nlist, self.index.d)
+                q = self.index.quantizer
+                q = faiss.downcast_index(q)
+                # print(f"[INFO] Quantizer type: {type(q)}")
+
+                centroids = None
+
+                # ✅ Try extracting from the IVF index itself
+                if hasattr(self.index, "reconstruct_n"):
+                    try:
+                        arr = self.index.reconstruct_n(0, self.index.nlist)
+                        centroids = arr.reshape(self.index.nlist, self.index.d)
+                        # print(f"[INFO] Extracted centroids via IVF.reconstruct_n: shape={centroids.shape}")
+                    except Exception as e:
+                        print(f"[WARN] IVF.reconstruct_n failed ({type(e).__name__}): {e}")
+
+
+                if centroids is None:
+                    print("[WARN] No centroids could be extracted.")
+
             except Exception as e:
                 print(f"[WARN] Could not extract centroids ({type(e).__name__}): {e}")
+                centroids = None
+
 
 
         if hasattr(self.index, "invlists"):
             try:
                 nlist = self.index.nlist
                 allowed_counts = np.zeros(nlist, dtype=np.int32)
+
                 for lid in range(nlist):
-                    ids = faiss.rev_swig_ptr(
-                        self.index.invlists.list_ids(lid),
-                        self.index.invlists.list_size(lid),
-                    )
+                    size = self.index.invlists.list_size(lid)
+                    if size == 0:
+                        continue
+
+                    # ✅ New API for FAISS >= 1.8.0
+                    ids_ptr = self.index.invlists.get_ids(lid)
+                    ids = faiss.rev_swig_ptr(ids_ptr, size)
                     allowed_counts[lid] = np.isin(ids, allow_ids).sum()
+
+                # print(f"[INFO] Computed allowed_counts per list (nonzero={np.count_nonzero(allowed_counts)})")
+
+            except AttributeError:
+                print("[WARN] This FAISS build does not expose invlists.get_ids; skipping allowed_counts.")
+                allowed_counts = None
+
             except Exception as e:
                 print(f"[WARN] Could not compute allowed_counts ({type(e).__name__}): {e}")
+                allowed_counts = None
+
 
 
         # 3) run the predicate-aware ANN loop

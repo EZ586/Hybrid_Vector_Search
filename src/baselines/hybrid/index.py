@@ -89,6 +89,9 @@ def build_ivf_index(
     ids = np.arange(n, dtype=np.int64)
     index.add_with_ids(vectors, ids)
 
+    # Enable DirectMap for later reconstruction
+    index.make_direct_map()
+
     # persist (to results/, not artifacts/) unless caller says otherwise
     if save_path is None:
         save_path = DEFAULT_INDEX_PATH
