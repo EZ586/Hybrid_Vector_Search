@@ -17,6 +17,27 @@ from typing import Optional, List
 import numpy as np
 
 
+def _ensure_1d_float(vec: np.ndarray, name: str) -> np.ndarray:
+    v = np.asarray(vec, dtype=np.float32)
+    if v.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {v.shape}")
+    return v
+
+
+def _ensure_2d_float(mat: np.ndarray, name: str) -> np.ndarray:
+    m = np.asarray(mat, dtype=np.float32)
+    if m.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got shape {m.shape}")
+    return m
+
+
+def _ensure_1d_int(arr: np.ndarray, name: str) -> np.ndarray:
+    a = np.asarray(arr, dtype=np.int64)
+    if a.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {a.shape}")
+    return a
+
+
 def score_centroids_ip(qvec: np.ndarray, centroids: np.ndarray) -> np.ndarray:
     """
     Compute similarity scores between a query vector and IVF centroids
@@ -29,10 +50,19 @@ def score_centroids_ip(qvec: np.ndarray, centroids: np.ndarray) -> np.ndarray:
     Returns:
         scores: (L,) float32. Higher = better / closer list to probe.
     """
-    # TODO: validate shapes (len(qvec) == centroids.shape[1])
-    # TODO: consider supporting L2 later
-    scores = centroids @ qvec
-    return scores
+    q = _ensure_1d_float(qvec, "qvec")
+    C = _ensure_2d_float(centroids, "centroids")
+
+    D = C.shape[1]
+    if q.shape[0] != D:
+        raise ValueError(
+            f"qvec dim {q.shape[0]} must match centroids dim {D} "
+            "(centroids.shape == (L, D))"
+        )
+
+    # (L, D) @ (D,) -> (L,)
+    scores = C @ q
+    return scores.astype(np.float32, copy=False)
 
 
 def order_lists_by_score(
@@ -50,24 +80,33 @@ def order_lists_by_score(
     Returns:
         list_ids: List[int] of length L. list_ids[0] is the best list to probe.
     """
-    # TODO: add shape checks
-    L = scores.shape[0]
-    list_ids = np.arange(L)
+    s = np.asarray(scores, dtype=np.float32)
+    if s.ndim != 1:
+        raise ValueError(f"scores must be 1D, got shape {s.shape}")
+    L = s.shape[0]
+    list_ids = np.arange(L, dtype=np.int64)
 
     if allowed_counts is None:
         # sort by score desc
-        order = np.argsort(-scores)
+        order = np.argsort(-s)
         return list_ids[order].tolist()
+
+    counts = _ensure_1d_int(allowed_counts, "allowed_counts")
+    if counts.shape[0] != L:
+        raise ValueError(
+            f"allowed_counts length {counts.shape[0]} "
+            f"must match scores length {L}"
+        )
 
     # two-phase ordering:
     # 1) lists with allowed>0, sorted by score desc
     # 2) lists with allowed==0, sorted by score desc (or just appended)
-    nonempty_mask = allowed_counts > 0
+    nonempty_mask = counts > 0
     nonempty_ids = list_ids[nonempty_mask]
     empty_ids = list_ids[~nonempty_mask]
 
-    nonempty_order = nonempty_ids[np.argsort(-scores[nonempty_mask])]
-    empty_order = empty_ids[np.argsort(-scores[~nonempty_mask])]
+    nonempty_order = nonempty_ids[np.argsort(-s[nonempty_mask])]
+    empty_order = empty_ids[np.argsort(-s[~nonempty_mask])]
 
     ordered = np.concatenate([nonempty_order, empty_order])
     return ordered.tolist()

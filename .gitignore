@@ -1,10 +1,14 @@
-dataset
-.vscode
-__pycache__/artifacts/v1/vectors.npy
-results/indexes/
+# IDE / system files
+.vscode/
+.DS_Store
+
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# Large data and indexes
 artifacts/v1/vectors.npy
 results/indexes/
-.DS_Store
-__pycache__/
-.DS_Store
-__pycache__/
+
+# Custom project directories
+dataset/

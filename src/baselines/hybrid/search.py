@@ -1,10 +1,15 @@
 # src/baselines/hybrid/search.py
 
-from typing import Iterable, Tuple, List, Dict, Any
+from typing import Iterable, Tuple, List, Dict, Any, Optional, Callable
 import time
 
 import numpy as np
 import faiss
+
+from src.baselines.hybrid.early_stop import stop_when_k_reached
+
+# Type alias for clarity
+SearchState = Dict[str, Any]
 
 
 def hybrid_search(
@@ -13,6 +18,11 @@ def hybrid_search(
     allow_ids: np.ndarray,
     K: int,
     nprobe_iter: Iterable[int],
+    *,
+    early_stop_policy: Optional[Callable[[SearchState], Tuple[bool, Optional[str]]]] = None,
+    global_bound: Optional[float] = None,
+    probe_order: Optional[List[int]] = None,
+    allowed_counts_per_list: Optional[np.ndarray] = None,
 ) -> Tuple[List[int], Dict[str, Any]]:
     """
     Predicate-aware ANN loop using FAISS IVF + IDSelectorBatch.
@@ -20,7 +30,9 @@ def hybrid_search(
     - enforces the allow-list inside FAISS (not post-filter)
     - progressively increases nprobe using the provided iterator
     - accumulates candidates across probes (doesn't overwrite each round)
-    - returns manual-compatible stats fields where possible
+    - optional early-stop policy can inspect the current state
+    - optional probe_order / allowed_counts_per_list are accepted but
+      currently used only for logging (FAISS still controls list traversal)
 
     Args:
         qvec: (D,) query vector, already L2-normalized for IP if needed.
@@ -28,6 +40,11 @@ def hybrid_search(
         allow_ids: 1D array of IDs allowed by metadata filters.
         K: final number of valid results to return.
         nprobe_iter: iterable of nprobe values to try in order.
+        early_stop_policy: optional callable(state) -> (bool, reason).
+            If None, defaults to stop_when_k_reached (baseline behavior).
+        global_bound: optional global score bound (passed to policy via state).
+        probe_order: optional ordering of IVF lists (currently for logging only).
+        allowed_counts_per_list: optional (L,) counts of allowed ids per list.
 
     Returns:
         ids: list of up to K valid ids (subset of allow_ids) in similarity order.
@@ -44,6 +61,9 @@ def hybrid_search(
             "bound_at_stop": None,
             "filter_selectivity": 0.0,
             "notes": "empty allow_ids",
+            "early_stop_used": False,
+            "early_stop_reason": None,
+            "probes_run": 0,
         }
 
     # FAISS wants int64 for IDSelectorBatch
@@ -62,7 +82,21 @@ def hybrid_search(
     candidates: Dict[int, float] = {}
     scored_vectors = 0
     lists_probed = 0
-    last_nprobe = None
+    last_nprobe: Optional[int] = None
+
+    # early-stop bookkeeping
+    if early_stop_policy is None:
+        policy = stop_when_k_reached
+        policy_name = "k_only"
+    else:
+        policy = early_stop_policy
+        # backend is responsible for remembering the name; we just report used/triggered
+        policy_name = None
+
+    kth_history: List[float] = []
+    early_stop_used = False
+    early_stop_reason: Optional[str] = None
+    probe_index = 0
 
     # simple oversample factor; can be tuned
     oversample_factor = 10
@@ -70,6 +104,7 @@ def hybrid_search(
 
     for nprobe in nprobe_iter:
         lists_probed += 1
+        probe_index += 1
         last_nprobe = nprobe
         index.nprobe = nprobe
 
@@ -86,13 +121,43 @@ def hybrid_search(
         for dist, idx in zip(returned_dists, returned_ids):
             if idx == -1:
                 continue
-            # if we see the same id in a later probe, keep the better score
             prev = candidates.get(idx)
             if prev is None or dist > prev:
                 candidates[idx] = dist
 
-        # stop if we already have enough
-        if len(candidates) >= K:
+        # compute current kth score if we have at least one candidate
+        current_kth_score: Optional[float] = None
+        if candidates:
+            # get scores sorted desc just enough to find kth
+            scores = np.fromiter(candidates.values(), dtype=np.float32)
+            if len(scores) >= K:
+                # kth best = K-th element of sorted-desc list
+                sorted_scores = np.sort(scores)[::-1]
+                current_kth_score = float(sorted_scores[K - 1])
+            else:
+                sorted_scores = np.sort(scores)[::-1]
+                current_kth_score = float(sorted_scores[-1])
+
+        # maintain kth history if we have K or more candidates
+        if current_kth_score is not None and len(candidates) >= K:
+            kth_history.append(current_kth_score)
+
+        # build search state for early-stop policy
+        state: SearchState = {
+            "K": K,
+            "num_candidates": len(candidates),
+            "current_kth_score": current_kth_score,
+            "probe_index": probe_index,
+            "global_bound": global_bound,
+            "kth_history": kth_history,
+            # window/epsilon are optional; policies can pick defaults
+        }
+
+        # apply early-stop policy (if we have at least K or policy chooses otherwise)
+        should_stop, reason = policy(state)
+        if should_stop:
+            early_stop_used = True
+            early_stop_reason = reason or "unspecified"
             break
 
     # sort candidates by score desc (FAISS IP = larger is better)
@@ -106,8 +171,8 @@ def hybrid_search(
     else:
         kth_at_stop = None
 
-    # we don't currently maintain a FAISS bound; leave as None
-    bound_at_stop = None
+    # we don't currently maintain a FAISS bound; leave as passed-in or None
+    bound_at_stop = global_bound
 
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -127,6 +192,11 @@ def hybrid_search(
         "bound_at_stop": bound_at_stop,
         "filter_selectivity": filter_selectivity,
         "notes": None,
+        "early_stop_used": early_stop_used,
+        "early_stop_reason": early_stop_reason,
+        "probes_run": probe_index,
     }
 
+    # NOTE: we do NOT stuff hybrid-specific extras here; the backend will
+    # build a stats["extras"] dict based on its own knobs.
     return top_ids, stats

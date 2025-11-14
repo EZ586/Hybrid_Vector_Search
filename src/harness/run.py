@@ -27,7 +27,7 @@ from src.dataio.validators import (
     build_allowed_ids,
 )
 
-# NEW: hybrid backend
+# hybrid backend
 from src.backends.hybrid_backend import HybridBackend  # adjust if your path differs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,8 +68,28 @@ def embed_qtext(qtext: str, model_name: str) -> np.ndarray:
 # Backend registry
 # ----------------------------
 def get_backend(
-    name: str, vectors: np.ndarray, metadata: pd.DataFrame, *, artifacts_root: Path
+    name: str,
+    vectors: np.ndarray,
+    metadata: pd.DataFrame,
+    *,
+    artifacts_root: Path,
+    # hybrid-specific knobs (optional; ignored by non-hybrid backends)
+    hybrid_use_ordering: bool = False,
+    hybrid_early_stop: str | None = None,
+    hybrid_global_bound: float | None = None,
 ) -> SearchBackend:
+    """
+    Construct a backend by name.
+
+    For 'hybrid', additional controls are available:
+
+      - hybrid_use_ordering: if True, HybridBackend will attempt to pass
+        list-ordering information down to the search layer.
+      - hybrid_early_stop: optional policy name string (e.g. "k_and_bound").
+      - hybrid_global_bound: optional float bound for early stop policies.
+
+    Non-hybrid backends ignore these options.
+    """
     # special-case hybrid because it uses a persisted FAISS index and reloads metadata
     if name == "hybrid":
         index_path = RESULTS_ROOT / "indexes" / "faiss_ivf.index"
@@ -80,6 +100,9 @@ def get_backend(
             nprobe_start=4,
             nprobe_step=4,
             nprobe_max=64,
+            hybrid_use_ordering=hybrid_use_ordering,
+            hybrid_early_stop=hybrid_early_stop,
+            hybrid_global_bound=hybrid_global_bound,
         )
 
     if name == "post_filter":
@@ -143,6 +166,37 @@ def main() -> None:
         default=1,
         help="Number of times to run each query for stability checks",
     )
+
+    # ----------------------------
+    # Hybrid-specific CLI flags (Person A – Task A4)
+    # ----------------------------
+    ap.add_argument(
+        "--hybrid-use-ordering",
+        action="store_true",
+        help=(
+            "Enable hybrid list ordering (if supported by the hybrid backend). "
+            "Ignored for non-hybrid backends."
+        ),
+    )
+    ap.add_argument(
+        "--hybrid-early-stop",
+        type=str,
+        default=None,
+        help=(
+            "Name of early-stop policy for hybrid backend (e.g. 'k_and_bound'). "
+            "Ignored for non-hybrid backends."
+        ),
+    )
+    ap.add_argument(
+        "--hybrid-global-bound",
+        type=float,
+        default=None,
+        help=(
+            "Optional global score bound for hybrid early-stop policies. "
+            "Ignored for non-hybrid backends."
+        ),
+    )
+
     args = ap.parse_args()
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,7 +219,13 @@ def main() -> None:
 
     # backend (now hybrid is supported)
     backend = get_backend(
-        args.backend, vectors, metadata, artifacts_root=bucket_dir
+        args.backend,
+        vectors,
+        metadata,
+        artifacts_root=bucket_dir,
+        hybrid_use_ordering=args.hybrid_use_ordering,
+        hybrid_early_stop=args.hybrid_early_stop,
+        hybrid_global_bound=args.hybrid_global_bound,
     )
     run_id = uuid.uuid4().hex[:10]
 
@@ -238,6 +298,10 @@ def main() -> None:
             if isinstance(bound_at_stop, (np.integer, np.floating)):
                 bound_at_stop = float(bound_at_stop)
 
+            early_stop_used = bool(stats.get("early_stop_used", False))
+            early_stop_reason = stats.get("early_stop_reason")
+            probes_run = stats.get("probes_run", None)
+
             out_row = {
                 "qid": int(qid),
                 "trial": int(trial),
@@ -252,9 +316,33 @@ def main() -> None:
                 "kth_at_stop": kth_at_stop,
                 "bound_at_stop": bound_at_stop,
                 "notes": stats.get("notes", None),
+                "early_stop_used": early_stop_used,
+                "early_stop_reason": early_stop_reason,
+                "probes_run": probes_run,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "run_id": run_id,
             }
+
+            # ----------------------------
+            # Hybrid-specific logging (Task A5)
+            # ----------------------------
+            if backend.name == "hybrid":
+                extras = stats.get("extras", {}) or {}
+
+                # Whether a custom probe order / per-list counts were in play
+                out_row["hybrid_has_probe_order"] = bool(
+                    extras.get("has_probe_order", False)
+                )
+                out_row["hybrid_has_allowed_counts_per_list"] = bool(
+                    extras.get("has_allowed_counts_per_list", False)
+                )
+
+                # What early-stop configuration was requested (if any)
+                out_row["hybrid_early_stop_policy"] = extras.get(
+                    "early_stop_policy", None
+                )
+                out_row["hybrid_global_bound"] = extras.get("global_bound", None)
+
             append_jsonl(out_row, out_path)
 
     print(

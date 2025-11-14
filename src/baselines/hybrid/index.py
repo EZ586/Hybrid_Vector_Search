@@ -2,16 +2,18 @@
 """
 Hybrid index utilities.
 
-This module does two things:
+This module does three things:
 
 1. Build a FAISS IndexIVFFlat over the canonical vectors from artifacts
    (v1 or v2), using the official loaders from dataio.
 2. Load an existing FAISS index from a path chosen by the caller.
+3. Expose IVF internals (centroids, list sizes, id→list mapping) as NumPy
+   arrays for downstream hybrid modules (ordering, early-stop, etc.).
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 import os
 
 import numpy as np
@@ -40,6 +42,10 @@ def _import_loaders():
         ) from e
     return load_vectors, load_vectors_meta
 
+
+# ---------------------------------------------------------------------------
+# Index building
+# ---------------------------------------------------------------------------
 
 def build_ivf_index(
     vectors: np.ndarray,
@@ -130,7 +136,7 @@ def build_ivf_index_from_artifacts(
     vectors = load_vectors(bucket_dir)
 
     # (optional) we could inspect meta here, but load_vectors_meta(...) is mostly
-    # for consistency / future checks
+    # for consistency / future checks and compliance with the data spec.
     _ = load_vectors_meta(bucket_dir)
 
     return build_ivf_index(
@@ -140,6 +146,10 @@ def build_ivf_index_from_artifacts(
         save_path=save_path,
     )
 
+
+# ---------------------------------------------------------------------------
+# Index loading
+# ---------------------------------------------------------------------------
 
 def load_ivf_index(path: str = DEFAULT_INDEX_PATH) -> faiss.IndexIVFFlat:
     """
@@ -154,7 +164,104 @@ def load_ivf_index(path: str = DEFAULT_INDEX_PATH) -> faiss.IndexIVFFlat:
             f"FAISS index not found at {path}. Build it first using "
             "`build_ivf_index_from_artifacts(...)` or `build_ivf_index(...)`."
         )
-    return faiss.read_index(path)
+    index = faiss.read_index(path)
+    return index
+
+
+# ---------------------------------------------------------------------------
+# IVF internals (Person A – Task A1)
+# ---------------------------------------------------------------------------
+
+def get_ivf_centroids(index: faiss.IndexIVFFlat) -> np.ndarray:
+    """
+    Extract IVF coarse quantizer centroids as a NumPy array.
+
+    Returns:
+        centroids: (L, D) float32 array where L = index.nlist and D = index.d.
+    """
+    if not isinstance(index, faiss.IndexIVFFlat):
+        raise TypeError("get_ivf_centroids currently supports faiss.IndexIVFFlat only")
+
+    nlist = int(index.nlist)
+    d = int(index.d)
+
+    centroids = np.empty((nlist, d), dtype=np.float32)
+    # quantizer holds one centroid per list; reconstruct(i) fetches it
+    for lid in range(nlist):
+        index.quantizer.reconstruct(lid, centroids[lid])
+
+    return centroids
+
+
+def get_ivf_list_sizes(index: faiss.IndexIVFFlat) -> np.ndarray:
+    """
+    Extract IVF list sizes as a NumPy array.
+
+    Returns:
+        list_sizes: (L,) int64 array where L = index.nlist and
+                    list_sizes[l] = number of vectors in list l.
+    """
+    if not isinstance(index, faiss.IndexIVFFlat):
+        raise TypeError("get_ivf_list_sizes currently supports faiss.IndexIVFFlat only")
+
+    ivf = faiss.extract_index_ivf(index)
+    invlists = ivf.invlists
+    if invlists is None:
+        # Unpopulated index (no vectors added yet)
+        return np.zeros(int(index.nlist), dtype=np.int64)
+
+    nlist = int(index.nlist)
+    list_sizes = np.empty(nlist, dtype=np.int64)
+    for lid in range(nlist):
+        list_sizes[lid] = invlists.list_size(lid)
+
+    return list_sizes
+
+
+def get_ivf_id_to_list_map(
+    index: faiss.IndexIVFFlat,
+    ntotal: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Build an array mapping each vector ID to its IVF list id.
+
+    Args:
+        index: faiss.IndexIVFFlat built with add_with_ids(...).
+        ntotal: optional total number of vectors (defaults to index.ntotal).
+
+    Returns:
+        id_to_list: (N,) int64 array where id_to_list[i] = list id (0..L-1)
+                    that currently contains vector i, or -1 if not present.
+
+    Notes:
+        - This is useful for per-query "allowed_counts_per_list" calculations.
+        - We rely on FAISS's inverted lists; this should only be called on
+          trained, populated IVF indices.
+    """
+    if not isinstance(index, faiss.IndexIVFFlat):
+        raise TypeError("get_ivf_id_to_list_map currently supports faiss.IndexIVFFlat only")
+
+    ivf = faiss.extract_index_ivf(index)
+    invlists = ivf.invlists
+    if invlists is None:
+        raise RuntimeError("Index has no inverted lists; has it been populated?")
+
+    nlist = int(index.nlist)
+    if ntotal is None:
+        ntotal = int(index.ntotal)
+
+    id_to_list = np.full(ntotal, -1, dtype=np.int64)
+
+    for lid in range(nlist):
+        sz = invlists.list_size(lid)
+        if sz == 0:
+            continue
+        ids_ptr = invlists.get_ids(lid)
+        ids = faiss.rev_swig_ptr(ids_ptr, sz)
+        # ids are the explicit IDs we added (0..N-1), so they can be used as indices
+        id_to_list[ids] = lid
+
+    return id_to_list
 
 
 __all__ = [
@@ -162,5 +269,9 @@ __all__ = [
     "build_ivf_index_from_artifacts",
     "load_ivf_index",
     "DEFAULT_INDEX_PATH",
-    "DEFAULT_FULL_INDEX_PATH",  
+    "DEFAULT_FULL_INDEX_PATH",
+    # IVF internals
+    "get_ivf_centroids",
+    "get_ivf_list_sizes",
+    "get_ivf_id_to_list_map",
 ]
