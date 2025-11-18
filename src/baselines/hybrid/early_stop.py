@@ -26,6 +26,10 @@ SearchState = Dict[str, Any]
 # - "kth_history": List[float]    # prev kth scores, newest at end
 # - "window": int                 # for stability-based stop
 # - "epsilon": float              # tolerance for stability
+# RM-style optional helpers (if provided by the search loop):
+# - "neighbor_radius": Optional[float]      # E-th best score so far (E >= K)
+# - "rm_window_median": Optional[float]     # median score of recent probes
+# - "rm_window_size": int                   # window size used for rm_window_median
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +137,54 @@ def stop_when_k_and_stable(state: SearchState) -> Tuple[bool, Optional[str]]:
 
     return False, None
 
+# ---------------------------------------------------------------------------
+# Policy 4: stop when K AND RM-style "outside neighborhood" condition holds
+# ---------------------------------------------------------------------------
+
+def stop_when_rm_and_k(state: SearchState) -> Tuple[bool, Optional[str]]:
+    """
+    Relaxed-monotonicity-inspired policy.
+
+    Intuition (for inner-product / similarity scores):
+      - "neighbor_radius" is the E-th best score over all candidates so far
+        (E >= K), so higher = better neighbor.
+      - "rm_window_median" is the median score of recently returned vectors;
+        if this median is consistently LOWER than neighbor_radius by at least
+        epsilon, we are mostly scanning "non-neighbors" and can treat this
+        as being in phase 2.
+
+    Stop when:
+      - we have at least K candidates, and
+      - neighbor_radius and rm_window_median are available, and
+      - neighbor_radius - rm_window_median >= epsilon.
+
+    Expected state keys (in addition to K / num_candidates):
+      - "neighbor_radius": Optional[float]
+      - "rm_window_median": Optional[float]
+      - "rm_window_size": int (optional)
+      - "epsilon": float (optional tolerance, default ~1e-3)
+    """
+    K = state.get("K")
+    num_candidates = state.get("num_candidates", 0)
+    if K is None or num_candidates < K:
+        return False, None
+
+    neighbor_radius = state.get("neighbor_radius", None)
+    rm_window_median = state.get("rm_window_median", None)
+    epsilon: float = state.get("epsilon", 1e-3)
+
+    # if we don't have the RM helpers, we cannot apply this policy
+    if neighbor_radius is None or rm_window_median is None:
+        return False, None
+
+    # For similarity scores: neighbors have HIGH scores.
+    # Once the median of recent probe scores is significantly LOWER
+    # than the neighbor radius, we are effectively outside the "good"
+    # neighborhood.
+    if (neighbor_radius - rm_window_median) >= epsilon:
+        return True, "rm_and_k"
+
+    return False, None
 
 # ---------------------------------------------------------------------------
 # Policy selector
@@ -146,6 +198,7 @@ def get_early_stop_policy(name: Optional[str]):
       - None or "k_only"        -> stop_when_k_reached
       - "k_and_bound"           -> stop_when_k_and_bound
       - "k_and_stable"          -> stop_when_k_and_stable
+      - "rm_and_k"              -> stop_when_rm_and_k
     """
     if name is None or name == "k_only":
         return stop_when_k_reached
@@ -153,5 +206,7 @@ def get_early_stop_policy(name: Optional[str]):
         return stop_when_k_and_bound
     if name == "k_and_stable":
         return stop_when_k_and_stable
+    if name == "rm_and_k":
+        return stop_when_rm_and_k
     # fallback
     return stop_when_k_reached

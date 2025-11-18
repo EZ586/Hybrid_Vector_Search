@@ -49,7 +49,7 @@ class HybridBackend(SearchBackend):
         metadata_dir: str = os.path.join(DEFAULT_METADATA_ROOT, DEFAULT_METADATA_BUCKET),
         nprobe_start: int = 4,
         nprobe_step: int = 4,
-        nprobe_max: int = 64,
+        nprobe_max: Optional[int] = None,
         *,
         hybrid_use_ordering: bool = False,
         hybrid_early_stop: Optional[str] = None,
@@ -78,10 +78,10 @@ class HybridBackend(SearchBackend):
         # precompute all ids for the “no filter” case
         self._all_ids: np.ndarray = self.metadata_df["id"].to_numpy(dtype=np.int64)
 
-        # 3) scheduler config
+        # 3) scheduler config (nprobe_max may be None and inferred later)
         self._nprobe_start = nprobe_start
         self._nprobe_step = nprobe_step
-        self._nprobe_max = nprobe_max
+        self._nprobe_max: Optional[int] = nprobe_max
 
         # 4) hybrid-specific knobs
         self._use_ordering: bool = bool(hybrid_use_ordering)
@@ -107,6 +107,14 @@ class HybridBackend(SearchBackend):
         self.n_lists: Optional[int] = None
         if self.ivf_centroids is not None:
             self.n_lists = int(self.ivf_centroids.shape[0])
+
+        # If caller did not specify nprobe_max, default to "all lists"
+        if self._nprobe_max is None:
+            if self.n_lists is not None:
+                self._nprobe_max = int(self.n_lists)
+            else:
+                # Fallback if IVF internals are unavailable for some reason
+                self._nprobe_max = 64
 
     # ------------------------------------------------------------------ #
     # internal helpers
@@ -199,11 +207,57 @@ class HybridBackend(SearchBackend):
                 # If anything goes wrong, just fall back silently
                 probe_order = None
 
-        # 4) build scheduler (still responsible for nprobe ladder)
+        # 4) build a per-query adaptive nprobe scheduler (no magic constants)
+        #
+        # We adjust the ladder based on filter selectivity, but only by
+        # scaling the backend's configured (start, step, max) values.
+        #
+        #   selectivity = |allow_ids| / |all_ids|
+        total_ids = self._all_ids.size if self._all_ids is not None else 0
+        if total_ids > 0:
+            selectivity = float(allow_ids.size) / float(total_ids)
+        else:
+            # degenerate case; treat as unfiltered
+            selectivity = 1.0
+
+        # backend defaults (set in __init__)
+        base_start = self._nprobe_start
+        base_step = self._nprobe_step
+        base_max = self._nprobe_max
+
+        # start with the backend defaults
+        nprobe_start = base_start
+        nprobe_step = base_step
+        nprobe_max = base_max
+
+        # VERY selective filters (< 1% allowed) → scale ladder UP to chase recall
+        # We don't hard-code absolute numbers; we just scale the configured ones.
+        if selectivity < 0.01:
+            scale = 2.0  # tune if needed
+            nprobe_start = max(1, int(base_start * scale))
+            nprobe_step = max(1, int(base_step * scale))
+            nprobe_max = max(nprobe_start, int(base_max * scale))
+
+        # For other selectivities (>= 1%), we keep the base ladder.
+        # (If you ever want a cheaper ladder for very unselective filters,
+        # you can add an `elif selectivity > 0.5:` branch here that scales DOWN.)
+
+        # Never exceed the number of IVF lists in the index
+        if self.n_lists is not None:
+            nprobe_max = min(nprobe_max, int(self.n_lists))
+
+        # If we know which lists contain at least one allowed id, we can also
+        # clamp nprobe_max so we don't waste probes on predicate-empty lists.
+        if allowed_counts_per_list is not None:
+            useful_lists = int(np.count_nonzero(allowed_counts_per_list > 0))
+            if useful_lists > 0:
+                nprobe_max = min(nprobe_max, useful_lists)
+
+        # Finally, build the iterator
         nprobe_iter = linear_nprobe_scheduler(
-            start=self._nprobe_start,
-            step=self._nprobe_step,
-            max_nprobe=self._nprobe_max,
+            start=nprobe_start,
+            step=nprobe_step,
+            max_nprobe=nprobe_max,
         )
 
         # 5) run the predicate-aware ANN loop

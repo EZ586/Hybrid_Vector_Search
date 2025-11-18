@@ -31,8 +31,10 @@ def hybrid_search(
     - progressively increases nprobe using the provided iterator
     - accumulates candidates across probes (doesn't overwrite each round)
     - optional early-stop policy can inspect the current state
-    - optional probe_order / allowed_counts_per_list are accepted but
-      currently used only for logging (FAISS still controls list traversal)
+    - optional probe_order / allowed_counts_per_list are accepted to support
+      higher-level scheduling decisions and logging, but FAISS still controls
+      the internal list traversal order via its own centroid scoring; this
+      function does NOT yet override the per-list scan order.
 
     Args:
         qvec: (D,) query vector, already L2-normalized for IP if needed.
@@ -98,6 +100,13 @@ def hybrid_search(
     early_stop_reason: Optional[str] = None
     probe_index = 0
 
+    # neighbor_radius_history: how the E-th best score evolves over probes
+    neighbor_radius_history: List[float] = []
+    # window_median_history: median score of *this probe's* returned vectors
+    window_median_history: List[float] = []
+    # small default window size for rolling median over probe medians
+    rm_window_size: int = 3
+
     # simple oversample factor; can be tuned
     oversample_factor = 10
     search_k = max(K * oversample_factor, K)
@@ -125,22 +134,45 @@ def hybrid_search(
             if prev is None or dist > prev:
                 candidates[idx] = dist
 
-        # compute current kth score if we have at least one candidate
+        # --- compute current kth score + RM-style helper metrics ---
         current_kth_score: Optional[float] = None
+        neighbor_radius: Optional[float] = None
+        probe_median: Optional[float] = None
+        rm_window_median: Optional[float] = None
+
         if candidates:
-            # get scores sorted desc just enough to find kth
+            # get scores sorted desc just enough to find kth and E-th (for radius)
             scores = np.fromiter(candidates.values(), dtype=np.float32)
-            if len(scores) >= K:
-                # kth best = K-th element of sorted-desc list
-                sorted_scores = np.sort(scores)[::-1]
+            sorted_scores = np.sort(scores)[::-1]
+
+            # kth best = K-th element of sorted-desc list (or worst if < K)
+            if len(sorted_scores) >= K:
                 current_kth_score = float(sorted_scores[K - 1])
             else:
-                sorted_scores = np.sort(scores)[::-1]
                 current_kth_score = float(sorted_scores[-1])
+
+            # E-neighborhood radius (E >= K, capped by #candidates)
+            # here we pick E = min(len(scores), max(K, 2*K)) as a simple heuristic
+            E = min(len(sorted_scores), max(K, 2 * K))
+            if E > 0:
+                neighbor_radius = float(sorted_scores[E - 1])
 
         # maintain kth history if we have K or more candidates
         if current_kth_score is not None and len(candidates) >= K:
             kth_history.append(current_kth_score)
+
+        # median score of *this probe's* returned vectors (RM helper)
+        probe_scores = returned_dists[valid_mask]
+        if probe_scores.size > 0:
+            probe_median = float(np.median(probe_scores))
+            window_median_history.append(probe_median)
+
+        # rolling median over the last `rm_window_size` probe medians
+        if window_median_history:
+            recent_medians = window_median_history[-rm_window_size:]
+            rm_window_median = float(
+                np.median(np.asarray(recent_medians, dtype=np.float32))
+            )
 
         # build search state for early-stop policy
         state: SearchState = {
@@ -150,7 +182,11 @@ def hybrid_search(
             "probe_index": probe_index,
             "global_bound": global_bound,
             "kth_history": kth_history,
-            # window/epsilon are optional; policies can pick defaults
+            # RM-style helpers (optional; policies can ignore them)
+            "neighbor_radius": neighbor_radius,
+            "rm_window_median": rm_window_median,
+            "rm_window_size": rm_window_size,
+            # window/epsilon are still available for legacy policies
         }
 
         # apply early-stop policy (if we have at least K or policy chooses otherwise)
@@ -176,6 +212,19 @@ def hybrid_search(
 
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
+    # RM-style summary at stop (optional, for logging/analysis)
+    neighbor_radius_at_stop: Optional[float] = None
+    rm_window_median_at_stop: Optional[float] = None
+
+    if neighbor_radius_history:
+        neighbor_radius_at_stop = neighbor_radius_history[-1]
+
+    if window_median_history:
+        recent_medians = window_median_history[-rm_window_size:]
+        rm_window_median_at_stop = float(
+            np.median(np.asarray(recent_medians, dtype=np.float32))
+        )
+
     # we can derive selectivity from index.ntotal
     try:
         total = index.ntotal
@@ -195,6 +244,12 @@ def hybrid_search(
         "early_stop_used": early_stop_used,
         "early_stop_reason": early_stop_reason,
         "probes_run": probe_index,
+        # RM-style extras (for analysis; current policies may ignore them)
+        "neighbor_radius_at_stop": neighbor_radius_at_stop,
+        "rm_window_median_at_stop": rm_window_median_at_stop,
+        # Hybrid wiring hooks (backend may also log them separately)
+        "has_probe_order": bool(probe_order is not None),
+        "has_allowed_counts_per_list": bool(allowed_counts_per_list is not None),
     }
 
     # NOTE: we do NOT stuff hybrid-specific extras here; the backend will

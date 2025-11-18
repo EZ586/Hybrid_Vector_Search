@@ -99,7 +99,7 @@ def get_backend(
             metadata_dir=str(metadata_dir),
             nprobe_start=4,
             nprobe_step=4,
-            nprobe_max=64,
+            nprobe_max=None,  # let HybridBackend infer from index.nlist
             hybrid_use_ordering=hybrid_use_ordering,
             hybrid_early_stop=hybrid_early_stop,
             hybrid_global_bound=hybrid_global_bound,

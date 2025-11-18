@@ -170,6 +170,16 @@ def load_ivf_index(path: str = DEFAULT_INDEX_PATH) -> faiss.IndexIVFFlat:
 
 # ---------------------------------------------------------------------------
 # IVF internals (Person A – Task A1)
+#
+# These helpers expose the partition structure of the IVF index in a
+# NumPy-friendly way. They are intentionally PURE (no artifacts / filters):
+#
+#   - get_ivf_centroids:  (L, D) coarse centroids for each list.
+#   - get_ivf_list_sizes: (L,)   number of vectors in each list.
+#   - get_ivf_id_to_list_map: (N,) mapping id -> list_id.
+#
+# Together with metadata-derived allow-lists, these are the building blocks
+# for predicate-aware, list-level scheduling (à la VBASE).
 # ---------------------------------------------------------------------------
 
 def get_ivf_centroids(index: faiss.IndexIVFFlat) -> np.ndarray:
