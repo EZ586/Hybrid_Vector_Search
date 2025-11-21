@@ -1,36 +1,35 @@
 # src/baselines/hybrid/index.py
 """
-Hybrid index utilities.
+Hybrid index utilities (HNSW version).
 
-This module does two things:
+This module replaces the IVF index builder with a FAISS HNSW index builder.
 
-1. Build a FAISS IndexIVFFlat over the canonical vectors from artifacts
-   (v1 or v2), using the official loaders from dataio.
-2. Load an existing FAISS index from a path chosen by the caller.
+It does the following:
+
+1. Build a FAISS IndexHNSWFlat over canonical vectors from artifacts.
+2. Load an existing FAISS HNSW index from disk.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 import os
+from pathlib import Path
 
 import numpy as np
 import faiss
-from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_INDEX_DIR = str(PROJECT_ROOT / "results" / "indexes")
-DEFAULT_INDEX_PATH = f"{DEFAULT_INDEX_DIR}/faiss_ivf.index"
+DEFAULT_INDEX_PATH = f"{DEFAULT_INDEX_DIR}/faiss_hnsw.index"
 
-# backward-compat for older week-4 code that imported this name
+# Backward compat name
 DEFAULT_FULL_INDEX_PATH = DEFAULT_INDEX_PATH
 
 
 def _import_loaders():
     """
-    Import the canonical artifact loaders defined in src/dataio/loaders.py.
-    We keep this in a helper so importing this module doesn't immediately fail
-    if PYTHONPATH isn't set up yet.
+    Import canonical artifact loaders defined in src/dataio/loaders.py.
     """
     try:
         from src.dataio.loaders import load_vectors, load_vectors_meta
@@ -41,58 +40,58 @@ def _import_loaders():
     return load_vectors, load_vectors_meta
 
 
-def build_ivf_index(
+# ---------------------------------------------------------------------
+#  HNSW Index Builder
+# ---------------------------------------------------------------------
+
+def build_hnsw_index(
     vectors: np.ndarray,
-    nlist: int,
+    M: int = 32,
+    ef_construction: int = 200,
     metric: str = "ip",
     save_path: Optional[str] = None,
-) -> faiss.IndexIVFFlat:
+) -> faiss.IndexHNSWFlat:
     """
-    Build and persist a FAISS IndexIVFFlat over the given vectors.
+    Build and optionally persist a FAISS HNSW index over the given vectors.
 
     Args:
-        vectors: (N, D) float32, contiguous, ids implied 0..N-1.
-        nlist: number of IVF lists (will be clamped to N).
+        vectors: (N, D) float32 canonical vectors.
+        M: Number of neighbors per node (graph degree).
+        ef_construction: HNSW build accuracy.
         metric: "ip" or "l2".
-        save_path: optional filesystem path to serialize the index. If None,
-            we will write to /results/indexes/faiss_ivf.index.
+        save_path: where to persist the index.
 
     Returns:
-        Trained and populated faiss.IndexIVFFlat.
+        Trained and populated faiss.IndexHNSWFlat object.
     """
     vectors = np.asarray(vectors, dtype=np.float32)
     vectors = np.ascontiguousarray(vectors)
     n, d = vectors.shape
 
-    # clamp nlist
-    nlist = min(max(1, int(nlist)), n)
-
-    # choose metric
     if metric == "ip":
+        # normalize vectors to unit length so IP = cosine similarity
         faiss.normalize_L2(vectors)
-        quantizer = faiss.IndexFlatIP(d)
         faiss_metric = faiss.METRIC_INNER_PRODUCT
     elif metric == "l2":
-        quantizer = faiss.IndexFlatL2(d)
         faiss_metric = faiss.METRIC_L2
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
-    index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss_metric)
+    # ------------------------------------------------------------------
+    # Create HNSW index
+    # ------------------------------------------------------------------
+    index = faiss.IndexHNSWFlat(d, M, faiss_metric)
+    index.hnsw.efConstruction = ef_construction
 
-    # train on full canonical vectors
-    index.train(vectors)
-    if not index.is_trained:
-        raise RuntimeError("IVF index failed to train")
+    # Add vectors
+    index.add(vectors)
 
-    # add with IDs aligned to 0..N-1
-    ids = np.arange(n, dtype=np.int64)
-    index.add_with_ids(vectors, ids)
+    # Recommended default search parameter
+    index.hnsw.efSearch = 128
 
-    # Enable DirectMap for later reconstruction
-    index.make_direct_map()
-
-    # persist (to results/, not artifacts/) unless caller says otherwise
+    # ------------------------------------------------------------------
+    # Persist index
+    # ------------------------------------------------------------------
     if save_path is None:
         save_path = DEFAULT_INDEX_PATH
 
@@ -102,141 +101,125 @@ def build_ivf_index(
     return index
 
 
-def build_ivf_index_from_artifacts(
+def build_hnsw_index_from_artifacts(
     artifacts_root: str = "/artifacts",
     bucket: str = "v2",
-    nlist: int = 1024,
+    M: int = 32,
+    ef_construction: int = 200,
     metric: str = "ip",
     save_path: Optional[str] = None,
-) -> faiss.IndexIVFFlat:
+) -> faiss.IndexHNSWFlat:
     """
     Convenience wrapper: load canonical vectors from artifacts/<bucket>/ and
-    build an IVF index over them, using the official loaders.
-
-    This matches your actual loaders, which take a single artifacts_root
-    (e.g. '/artifacts/v2') and look for vectors.npy, vectors.meta.json, etc.
+    build an HNSW index over them.
 
     Args:
-        artifacts_root: base artifacts dir, typically "/artifacts".
+        artifacts_root: base artifacts dir (e.g. "/artifacts").
         bucket: "v1" or "v2".
-        nlist: IVF list count.
+        M: graph degree.
+        ef_construction: HNSW build budget.
         metric: "ip" or "l2".
-        save_path: where to write the index. If None, defaults to /results/indexes/...
+        save_path: path to save the index.
 
     Returns:
-        A trained and populated FAISS index.
+        Populated FAISS HNSW index.
     """
     load_vectors, load_vectors_meta = _import_loaders()
 
     bucket_dir = os.path.join(artifacts_root, bucket)
-
-    # load canonical vectors via the real loader (one arg only)
     vectors = load_vectors(bucket_dir)
+    _ = load_vectors_meta(bucket_dir)  # not strictly needed
 
-    # (optional) we could inspect meta here, but load_vectors_meta(...) is mostly
-    # for consistency / future checks
-    _ = load_vectors_meta(bucket_dir)
-
-    return build_ivf_index(
+    return build_hnsw_index(
         vectors=vectors,
-        nlist=nlist,
+        M=M,
+        ef_construction=ef_construction,
         metric=metric,
         save_path=save_path,
     )
 
 
-def load_ivf_index(path: str = DEFAULT_INDEX_PATH) -> faiss.IndexIVFFlat:
+# ---------------------------------------------------------------------
+#  Loader
+# ---------------------------------------------------------------------
+
+def load_hnsw_index(path: str = DEFAULT_INDEX_PATH) -> faiss.IndexHNSWFlat:
     """
-    Load a previously persisted FAISS IVF index.
+    Load a previously saved HNSW index.
 
     Args:
-        path: filesystem path to .index file. Defaults to /results/indexes/faiss_ivf.index
-              so that harness/backends can just call this without touching artifacts.
+        path: path to .index file.
+
+    Returns:
+        FAISS IndexHNSWFlat.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"FAISS index not found at {path}. Build it first using "
-            "`build_ivf_index_from_artifacts(...)` or `build_ivf_index(...)`."
+            f"HNSW index not found at {path}. Build it via "
+            "`build_hnsw_index_from_artifacts(...)` or `build_hnsw_index(...)`."
         )
     return faiss.read_index(path)
 
 
 __all__ = [
-    "build_ivf_index",
-    "build_ivf_index_from_artifacts",
-    "load_ivf_index",
+    "build_hnsw_index",
+    "build_hnsww_index_from_artifacts",
+    "load_hnsw_index",
     "DEFAULT_INDEX_PATH",
-    "DEFAULT_FULL_INDEX_PATH",  
+    "DEFAULT_FULL_INDEX_PATH",
 ]
 
+
 # ---------------------------------------------------------------------
-# CLI entrypoint: allow building an index directly from terminal
+#  CLI
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     import argparse
     from datetime import datetime
 
-    parser = argparse.ArgumentParser(description="Build a FAISS IVF index from artifacts.")
-    parser.add_argument(
-        "--artifacts",
-        type=str,
-        default="/artifacts",
-        help="Base artifacts directory (default: /artifacts)",
-    )
-    parser.add_argument(
-        "--bucket",
-        type=str,
-        default="v2",
-        help="Subfolder (bucket) name within artifacts, e.g. v1 or v2 (default: v2)",
-    )
-    parser.add_argument(
-        "--nlist",
-        type=int,
-        default=1024,
-        help="Number of IVF lists (default: 1024)",
-    )
-    parser.add_argument(
-        "--metric",
-        type=str,
-        choices=["ip", "l2"],
-        default="ip",
-        help="Distance metric to use for FAISS index (default: ip)",
-    )
-    parser.add_argument(
-        "--save",
-        type=str,
-        default=None,
-        help="Optional path to save index file (default: results/indexes/faiss_ivf.index)",
-    )
+    parser = argparse.ArgumentParser(description="Build a FAISS HNSW index from artifacts.")
+    parser.add_argument("--artifacts", type=str, default="/artifacts",
+                        help="Base artifacts directory.")
+    parser.add_argument("--bucket", type=str, default="v2",
+                        help="Subfolder (bucket) name within artifacts.")
+    parser.add_argument("--M", type=int, default=32,
+                        help="HNSW graph degree (default 32).")
+    parser.add_argument("--efC", type=int, default=200,
+                        help="HNSW efConstruction (default 200).")
+    parser.add_argument("--metric", type=str, choices=["ip", "l2"],
+                        default="ip", help="Distance metric (default ip).")
+    parser.add_argument("--save", type=str, default=None,
+                        help="Optional path to save index.")
 
     args = parser.parse_args()
 
-    print("Building FAISS IVF index...")
+    print("Building FAISS HNSW index...")
     print(f"  Artifacts dir : {args.artifacts}")
     print(f"  Bucket        : {args.bucket}")
-    print(f"  nlist         : {args.nlist}")
+    print(f"  M             : {args.M}")
+    print(f"  efConstruction: {args.efC}")
     print(f"  Metric        : {args.metric}")
 
     try:
-        index = build_ivf_index_from_artifacts(
+        index = build_hnsw_index_from_artifacts(
             artifacts_root=args.artifacts,
             bucket=args.bucket,
-            nlist=args.nlist,
+            M=args.M,
+            ef_construction=args.efC,
             metric=args.metric,
             save_path=args.save,
         )
+
         print(f"✅ Index built successfully!")
         print(f"   Index type  : {type(index)}")
-        print(f"   nlist       : {index.nlist}")
         print(f"   ntotal      : {index.ntotal}")
         print(f"   dimension   : {index.d}")
 
-        # write to disk if not already saved
         out_path = args.save or DEFAULT_INDEX_PATH
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         print(f"📦 Saved index → {out_path}  (built {timestamp})")
 
     except Exception as e:
         import traceback
-        print(f"❌ Failed to build index ({type(e).__name__}): {e}")
+        print(f"❌ Failed to build HNSW index ({type(e).__name__}): {e}")
         traceback.print_exc()

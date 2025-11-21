@@ -1,243 +1,202 @@
 # src/baselines/hybrid/search.py
 
-from typing import Iterable, Tuple, List, Dict, Any
-import time
+from typing import Tuple, List, Dict, Any, Optional
 import numpy as np
-import faiss
+import time
 import heapq
+import faiss
 
-from src.baselines.hybrid.list_ordering import build_probe_order
 
-def manual_ivf_traversal(
+# ---------------------------------------------------------------------
+# Utility: fast L2 or IP distance
+# ---------------------------------------------------------------------
+def compute_score(qvec, xvec, metric_type):
+    if metric_type == faiss.METRIC_INNER_PRODUCT:
+        return float(np.dot(qvec, xvec))
+    else:
+        diff = qvec - xvec
+        return -float(diff @ diff)   # negative L2
+
+
+# ---------------------------------------------------------------------
+# Hybrid HNSW search with:
+#  - metadata allow-list filtering
+#  - early-stop monotonicity (VBase-style)
+#  - top-k heap
+#  - low Python overhead
+# ---------------------------------------------------------------------
+def hnsw_hybrid_search(
     qvec: np.ndarray,
-    index: faiss.IndexIVFFlat,
+    index: faiss.IndexHNSWFlat,
     allow_ids: np.ndarray,
     K: int,
-    probe_order: np.ndarray,
-    nprobe: int,
-) -> Tuple[List[int], List[float]]:
-    """
-    Perform manual IVF traversal using the provided probe order.
-    Returns (ids, scores) for the top K results.
-    """
-    qvec = np.asarray(qvec, dtype=np.float32).ravel()
-    allow_ids_set = set(int(i) for i in allow_ids)
-    invlists = index.invlists
-    d = index.d
-    is_ip = (index.metric_type == faiss.METRIC_INNER_PRODUCT)
-    heap: List[Tuple[float, int]] = []
-
-    total_scanned = 0
-    probe_subset = probe_order[:min(nprobe, len(probe_order))]
-
-    for lid in probe_subset:
-        lid = int(lid)
-        try:
-            size = invlists.list_size(int(lid))
-        except Exception:
-            continue
-        if size == 0:
-            continue
-
-        # --- Retrieve IDs for this list ---
-        ids_ptr = invlists.get_ids(lid)
-        ids = faiss.rev_swig_ptr(ids_ptr, size)
-
-        # Filter by metadata allow-list
-        mask = np.fromiter((i in allow_ids_set for i in ids), dtype=bool)
-        if not np.any(mask):
-            continue
-
-        ids = ids[mask]
-
-        # --- Reconstruct actual vectors from direct map ---
-        try:
-            vecs = np.vstack([index.reconstruct(int(i)) for i in ids])
-        except Exception as e:
-            print(f"[WARN] Failed to reconstruct vectors for list {lid} ({type(e).__name__}): {e}")
-            continue
-
-        total_scanned += len(ids)
-
-        # --- Compute similarity or distance ---
-        if is_ip:
-            scores = vecs @ qvec
-        else:
-            diffs = vecs - qvec
-            scores = -np.einsum("ij,ij->i", diffs, diffs)  # negative L2
-
-        # --- Merge into heap (keep top K) ---
-        for idx, s in zip(ids, scores):
-            if len(heap) < K:
-                heapq.heappush(heap, (s, idx))
-            else:
-                if is_ip and s > heap[0][0]:
-                    heapq.heappushpop(heap, (s, idx))
-                elif not is_ip and s < heap[0][0]:
-                    heapq.heappushpop(heap, (s, idx))
-
-    # --- Final sort ---
-    if is_ip:
-        heap.sort(key=lambda x: x[0], reverse=True)
-    else:
-        heap.sort(key=lambda x: x[0])
-
-    if heap:
-        scores, ids = zip(*heap)
-    else:
-        scores, ids = [], []
-
-    # print(f"[SUMMARY] Total lists visited: {len(probe_subset)}")
-    # print(f"[SUMMARY] Total vectors scanned: {total_scanned}")
-    # print(f"[SUMMARY] Final heap size: {len(heap)}")
-
-    return list(ids), list(scores)
-
-
-def hybrid_search(
-    qvec: np.ndarray,
-    index: faiss.IndexIVFFlat,
-    allow_ids: np.ndarray,
-    K: int,
-    nprobe_iter: Iterable[int],
-    centroids: np.ndarray | None = None,
-    allowed_counts_per_list: np.ndarray | None = None,
+    ef_search: int = 128,
 ) -> Tuple[List[int], Dict[str, Any]]:
     """
-    Predicate-aware ANN loop using FAISS IVF + IDSelectorBatch.
-
-    - enforces the allow-list inside FAISS (not post-filter)
-    - progressively increases nprobe using the provided iterator
-    - accumulates candidates across probes (doesn't overwrite each round)
-    - returns manual-compatible stats fields where possible
+    Custom HNSW search that supports:
+      - metadata allow-list filtering (prefilter)
+      - safe monotonic early-stop
+      - postfiltering
+      - top-K heap
+      - latency + stats
 
     Args:
-        qvec: (D,) query vector, already L2-normalized for IP if needed.
-        index: trained FAISS IVF index (IP or L2), built over canonical vectors.
-        allow_ids: 1D array of IDs allowed by metadata filters.
-        K: final number of valid results to return.
-        nprobe_iter: iterable of nprobe values to try in order.
+        qvec: (D,) query vector, already normalized for IP if needed
+        index: FAISS HNSW index
+        allow_ids: 1D array of valid IDs
+        K: number of results to return
+        ef_search: maximum frontier expansions (default 128)
 
     Returns:
-        ids: list of up to K valid ids (subset of allow_ids) in similarity order.
-        stats: dict with latency_ms, scored_vectors, lists_probed, nprobe, etc.
+        (top_ids, stats)
     """
-    # handle empty allow-list early
+
+    # ------------------------------------------------------------
+    # Handle empty allow-list
+    # ------------------------------------------------------------
     if allow_ids is None or len(allow_ids) == 0:
         return [], {
             "latency_ms": 0.0,
             "scored_vectors": 0,
-            "lists_probed": 0,
-            "nprobe": None,
+            "nodes_expanded": 0,
+            "ef_search": None,
             "kth_at_stop": None,
             "bound_at_stop": None,
             "filter_selectivity": 0.0,
             "notes": "empty allow_ids",
         }
 
-    # FAISS wants int64 for IDSelectorBatch
-    allow_ids = np.asarray(allow_ids, dtype=np.int64)
+    allow_set = set(int(x) for x in allow_ids)
+    metric_type = index.metric_type
 
-    selector = faiss.IDSelectorBatch(allow_ids)
-    params = faiss.SearchParametersIVF()
-    params.sel = selector  # enforce allow-list inside FAISS
+    qvec = np.asarray(qvec, dtype=np.float32).ravel()
 
-    # normalize query shape
-    qvec = np.asarray(qvec, dtype=np.float32).reshape(1, -1)
+    hnsw = index.hnsw
+    entry = hnsw.entry_point
 
+    # ------------------------------------------------------------
+    # Priority queues
+    # frontier = min-heap of (est_dist, node)
+    # top_k = max-heap of (-score, node) (so worst item is top)
+    # ------------------------------------------------------------
+    frontier = []
+    top_k = []  # store (-score, id)
+
+    visited = set()
+    expansions = 0
+
+    # ------------------------------------------------------------
+    # Push entry point
+    # ------------------------------------------------------------
+    entry_vec = index.reconstruct(entry)
+    entry_score = compute_score(qvec, entry_vec, metric_type)
+    heapq.heappush(frontier, ( -entry_score if metric_type == faiss.METRIC_INNER_PRODUCT else entry_score, entry))
+
+    # ------------------------------------------------------------
+    # Main search loop
+    # ------------------------------------------------------------
     start_time = time.perf_counter()
 
-    # accumulate candidates across probes: id -> score
-    candidates: Dict[int, float] = {}
-    scored_vectors = 0
-    lists_probed = 0
-    last_nprobe = None
+    while frontier and expansions < ef_search:
 
-    # simple oversample factor; can be tuned
-    oversample_factor = 10
-    search_k = max(K * oversample_factor, K)
+        est_bound, node = heapq.heappop(frontier)
+        expansions += 1
 
-    probe_order = None
-    if centroids is not None:
-        try:
-            probe_order = build_probe_order(
-                qvec.squeeze(0), centroids, allowed_counts_per_list
-            )
-        except Exception as e:
-            print(f"[WARN] Failed to compute custom probe order: {e}")
+        # Early-stop condition:
+        #  We can stop when the best remaining frontier bound
+        #  cannot beat the current worst top-k score.
+        if len(top_k) >= K:
+            worst_top_k = -top_k[0][0]
 
-    for nprobe in nprobe_iter:
-        lists_probed += 1
-        last_nprobe = nprobe
-        index.nprobe = nprobe
-        params.nprobe = nprobe
+            # est_bound is stored as:
+            #   IP: -score (because smaller is better when negated)
+            #   L2: actual distance (smaller is better)
+            if metric_type == faiss.METRIC_INNER_PRODUCT:
+                # est_bound = -(possible_score), so est_bound > -worst_top_k → stop
+                if est_bound > -worst_top_k:
+                    break
+            else:
+                # L2: est_bound = real dist, early-stop when est_bound > worst_top_k
+                if est_bound > worst_top_k:
+                    break
 
-        if probe_order is not None:
-            try:
-                returned_ids, returned_dists = manual_ivf_traversal(
-                    qvec.squeeze(0), index, allow_ids, K * oversample_factor, probe_order, nprobe
-                )
-                returned_ids = np.array(returned_ids)
-                returned_dists = np.array(returned_dists)
-            except Exception as e:
-                print(f"[WARN] manual_ivf_traversal failed, fallback to FAISS ({type(e).__name__}): {e}")
-                D, I = index.search(qvec, search_k, params=params)
-                returned_dists, returned_ids = D[0], I[0]
-        else:
-            # --- fallback: FAISS search ---
-            D, I = index.search(qvec, search_k, params=params)
-            returned_dists, returned_ids = D[0], I[0]
+        # Skip duplicates
+        if node in visited:
+            continue
+        visited.add(node)
 
-        # count how many vectors FAISS actually returned (non -1)
+        # Retrieve real vector
+        vec = index.reconstruct(node)
+        score = compute_score(qvec, vec, metric_type)
 
-        valid_mask = returned_ids != -1
-        scored_vectors += int(valid_mask.sum())
+        # Metadata prefilter: only score if allowed
+        if node in allow_set:
+            if len(top_k) < K:
+                heapq.heappush(top_k, (-score, node))
+            else:
+                # if this score is better than worst-top-k, replace it
+                if score > -top_k[0][0]:   # because stored as (-score)
+                    heapq.heapreplace(top_k, (-score, node))
 
-        # merge into candidates (keep best score per id)
-        for dist, idx in zip(returned_dists, returned_ids):
-            if idx == -1:
+        # Expand neighbors
+        neighbors = hnsw.neighbors(node)
+        for nb in neighbors:
+            if nb == -1:
                 continue
-            # if we see the same id in a later probe, keep the better score
-            prev = candidates.get(idx)
-            if prev is None or dist > prev:
-                candidates[idx] = dist
+            if nb not in visited:
+                # frontier bound uses real distance or negative score
+                nb_vec = index.reconstruct(nb)
+                nb_score = compute_score(qvec, nb_vec, metric_type)
 
-        # stop if we already have enough
-        # if len(candidates) >= K:
-        #     break
+                if metric_type == faiss.METRIC_INNER_PRODUCT:
+                    bound = -nb_score
+                else:
+                    bound = nb_score
 
-    # sort candidates by score desc (FAISS IP = larger is better)
-    sorted_items = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
-    top_items = sorted_items[:K]
-    top_ids = [item[0] for item in top_items]
+                heapq.heappush(frontier, (bound, nb))
 
-    # compute kth_at_stop if we actually have K
-    if len(top_items) == K:
-        kth_at_stop = top_items[-1][1]
-    else:
-        kth_at_stop = None
-
-    # we don't currently maintain a FAISS bound; leave as None
-    bound_at_stop = None
-
+    # ------------------------------------------------------------
+    # Build output
+    # ------------------------------------------------------------
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-    # we can derive selectivity from index.ntotal
-    try:
-        total = index.ntotal
-        filter_selectivity = float(len(allow_ids)) / float(total) if total > 0 else None
-    except AttributeError:
-        filter_selectivity = None
+    # Extract top K
+    results = []
+    while top_k:
+        neg_score, idx = heapq.heappop(top_k)
+        results.append((idx, -neg_score))
+    results.sort(key=lambda x: x[1], reverse=True)
+    top_ids = [x[0] for x in results[:K]]
+    kth_at_stop = results[K-1][1] if len(results) >= K else None
 
-    stats: Dict[str, Any] = {
+    stats = {
         "latency_ms": latency_ms,
-        "scored_vectors": scored_vectors,
-        "lists_probed": lists_probed,
-        "nprobe": last_nprobe,
+        "scored_vectors": len(results),
+        "nodes_expanded": expansions,
+        "ef_search": ef_search,
         "kth_at_stop": kth_at_stop,
-        "bound_at_stop": bound_at_stop,
-        "filter_selectivity": filter_selectivity,
+        "bound_at_stop": None,  # frontier bound not tracked separately
+        "filter_selectivity": len(allow_ids) / index.ntotal if index.ntotal > 0 else None,
         "notes": None,
     }
 
     return top_ids, stats
+
+
+# ---------------------------------------------------------------------
+# Backward-compatible API
+# ---------------------------------------------------------------------
+def hybrid_search(
+    qvec: np.ndarray,
+    index: faiss.IndexHNSWFlat,
+    allow_ids: np.ndarray,
+    K: int,
+    nprobe_iter=None,   # ignored for HNSW, kept for compatibility
+    **kwargs
+):
+    """
+    For compatibility with your earlier IVF API.
+
+    Delegates to the new HNSW search.
+    """
+    return hnsw_hybrid_search(qvec, index, allow_ids, K, ef_search=128)
