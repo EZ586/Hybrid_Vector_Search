@@ -116,6 +116,7 @@ def hybrid_search(
         probe_index += 1
         last_nprobe = nprobe
         index.nprobe = nprobe
+        params.nprobe = nprobe
 
         # search with selector enforced
         D, I = index.search(qvec, search_k, params=params)
