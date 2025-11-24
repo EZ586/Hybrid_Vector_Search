@@ -103,6 +103,7 @@ def stop_when_k_and_stable(state: SearchState) -> Tuple[bool, Optional[str]]:
 
     Stop when:
       - we have at least K candidates
+      - we have run at least `min_probes` probes
       - we have a history of kth scores
       - over the last `window` probes, kth did not improve more than `epsilon`
 
@@ -110,16 +111,26 @@ def stop_when_k_and_stable(state: SearchState) -> Tuple[bool, Optional[str]]:
       - "K": int
       - "num_candidates": int
       - "kth_history": List[float]  (newest at end)
-      - "window": int               (e.g. 2 or 3)
+      - "probe_index": int          (1-based probe counter)
+      - "window": int               (e.g. 3)
       - "epsilon": float            (e.g. 1e-3)
+      - "min_probes": int           (e.g. 3)
     """
     K = state.get("K")
     num_candidates = state.get("num_candidates", 0)
     kth_history: List[float] = state.get("kth_history") or []
-    window: int = state.get("window", 2)
+    probe_index: int = state.get("probe_index", 0)
+
+    # Defaults: require at least 3 probes and use a 3-step stability window
+    window: int = state.get("window", 3)
     epsilon: float = state.get("epsilon", 1e-3)
+    min_probes: int = state.get("min_probes", 3)
 
     if K is None or num_candidates < K:
+        return False, None
+
+    # Do not allow early-stop before we've run enough probes
+    if probe_index < min_probes:
         return False, None
 
     # need at least `window` points to judge stability

@@ -1,6 +1,5 @@
-
 """
-Computes recall@K between the backend ids and oracle ids
+Computes recall@K between the backend ids and oracle ids.
 
 Args:
     backend_ids: list[int]
@@ -11,8 +10,15 @@ Args:
         Cutoff for evaluation
 """
 def compute_recall(backend_ids, oracle_ids, K) -> float:
-    # convert into set for efficiency
-    backend_set = set(backend_ids[:K])
-    oracle_set = set(oracle_ids[:K])
+    # Take top-K from each, but ignore padding (-1) if present
+    backend_top = [i for i in backend_ids[:K] if i != -1]
+    oracle_top = [i for i in oracle_ids[:K] if i != -1]
+
+    # If oracle has fewer than K valid ids, we normalize by its length
+    denom = max(1, min(K, len(oracle_top)))
+
+    backend_set = set(backend_top)
+    oracle_set = set(oracle_top)
     intersection = len(backend_set & oracle_set)
-    return intersection / K
+
+    return intersection / denom

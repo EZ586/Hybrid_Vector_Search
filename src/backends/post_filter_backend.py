@@ -25,7 +25,8 @@ import pandas as pd
 
 from src.backends.backend_interface import SearchBackend
 from src.baselines.post_filter import post_filter_search
-from src.dataio.loaders import load_metadata, load_vectors_index
+from src.dataio.loaders import load_metadata
+from src.baselines.hybrid.index import load_ivf_index, DEFAULT_INDEX_PATH
 
 
 class PostFilterBackend(SearchBackend):
@@ -52,9 +53,29 @@ class PostFilterBackend(SearchBackend):
                 raise ValueError("metadata must have an 'id' column or be indexed by 'id'.")
         self.metadata = md
 
-        self.ann_index = load_vectors_index(artifacts_root)  # must expose .search(qvec, k)
-        if not hasattr(self.ann_index, "search"):
-            raise AttributeError("ann_index must provide a .search(qvec, k) method")
+        # Reuse the same persisted IVF index that the hybrid backend uses,
+        # so post-filter and hybrid compare apples-to-apples.
+        index_path = DEFAULT_INDEX_PATH
+        faiss_index = load_ivf_index(index_path)
+
+        # Tiny adapter to match the expected .search(qvec, k) API
+        class _IVFAdapter:
+            def __init__(self, index, nprobe: int = 64):
+                self.index = index
+                self.nprobe = int(nprobe)
+
+            def search(self, qvec: np.ndarray, k: int):
+                import numpy as _np
+                q = _np.asarray(qvec, dtype=_np.float32).reshape(1, -1)
+                self.index.nprobe = self.nprobe
+                scores, ids = self.index.search(q, int(k))
+                ids = ids[0]
+                scores = scores[0]
+                mask = ids >= 0
+                return ids[mask].astype(int), scores[mask].astype(float)
+
+        # ANN index for post-filter: same IVF, higher nprobe than hybrid's typical
+        self.ann_index = _IVFAdapter(faiss_index, nprobe=64)
 
     def search(self, qvec: np.ndarray, filters: Dict[str, Any], K: int) -> Tuple[List[int], Dict[str, Any]]:
         """Run the post-filter baseline and adapt stats for the harness."""

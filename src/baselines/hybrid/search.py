@@ -7,6 +7,7 @@ import numpy as np
 import faiss
 
 from src.baselines.hybrid.early_stop import stop_when_k_reached
+from src.baselines.hybrid.selector import build_idselector
 
 # Type alias for clarity
 SearchState = Dict[str, Any]
@@ -21,8 +22,6 @@ def hybrid_search(
     *,
     early_stop_policy: Optional[Callable[[SearchState], Tuple[bool, Optional[str]]]] = None,
     global_bound: Optional[float] = None,
-    probe_order: Optional[List[int]] = None,
-    allowed_counts_per_list: Optional[np.ndarray] = None,
 ) -> Tuple[List[int], Dict[str, Any]]:
     """
     Predicate-aware ANN loop using FAISS IVF + IDSelectorBatch.
@@ -31,10 +30,6 @@ def hybrid_search(
     - progressively increases nprobe using the provided iterator
     - accumulates candidates across probes (doesn't overwrite each round)
     - optional early-stop policy can inspect the current state
-    - optional probe_order / allowed_counts_per_list are accepted to support
-      higher-level scheduling decisions and logging, but FAISS still controls
-      the internal list traversal order via its own centroid scoring; this
-      function does NOT yet override the per-list scan order.
 
     Args:
         qvec: (D,) query vector, already L2-normalized for IP if needed.
@@ -45,8 +40,6 @@ def hybrid_search(
         early_stop_policy: optional callable(state) -> (bool, reason).
             If None, defaults to stop_when_k_reached (baseline behavior).
         global_bound: optional global score bound (passed to policy via state).
-        probe_order: optional ordering of IVF lists (currently for logging only).
-        allowed_counts_per_list: optional (L,) counts of allowed ids per list.
 
     Returns:
         ids: list of up to K valid ids (subset of allow_ids) in similarity order.
@@ -68,10 +61,10 @@ def hybrid_search(
             "probes_run": 0,
         }
 
-    # FAISS wants int64 for IDSelectorBatch
+    # FAISS wants int64 for IDSelectorBatch (via selector helper)
     allow_ids = np.asarray(allow_ids, dtype=np.int64)
 
-    selector = faiss.IDSelectorBatch(allow_ids)
+    selector = build_idselector(allow_ids)
     params = faiss.SearchParametersIVF()
     params.sel = selector  # enforce allow-list inside FAISS
 
@@ -89,11 +82,8 @@ def hybrid_search(
     # early-stop bookkeeping
     if early_stop_policy is None:
         policy = stop_when_k_reached
-        policy_name = "k_only"
     else:
         policy = early_stop_policy
-        # backend is responsible for remembering the name; we just report used/triggered
-        policy_name = None
 
     kth_history: List[float] = []
     early_stop_used = False
@@ -108,7 +98,7 @@ def hybrid_search(
     rm_window_size: int = 3
 
     # simple oversample factor; can be tuned
-    oversample_factor = 10
+    oversample_factor = 20
     search_k = max(K * oversample_factor, K)
 
     for nprobe in nprobe_iter:
@@ -153,10 +143,12 @@ def hybrid_search(
                 current_kth_score = float(sorted_scores[-1])
 
             # E-neighborhood radius (E >= K, capped by #candidates)
-            # here we pick E = min(len(scores), max(K, 2*K)) as a simple heuristic
+            # here we pick E = min(len(sorted_scores), max(K, 2*K)) as a simple heuristic
             E = min(len(sorted_scores), max(K, 2 * K))
             if E > 0:
                 neighbor_radius = float(sorted_scores[E - 1])
+                # track how the neighborhood radius evolves over probes
+                neighbor_radius_history.append(neighbor_radius)
 
         # maintain kth history if we have K or more candidates
         if current_kth_score is not None and len(candidates) >= K:
@@ -248,9 +240,6 @@ def hybrid_search(
         # RM-style extras (for analysis; current policies may ignore them)
         "neighbor_radius_at_stop": neighbor_radius_at_stop,
         "rm_window_median_at_stop": rm_window_median_at_stop,
-        # Hybrid wiring hooks (backend may also log them separately)
-        "has_probe_order": bool(probe_order is not None),
-        "has_allowed_counts_per_list": bool(allowed_counts_per_list is not None),
     }
 
     # NOTE: we do NOT stuff hybrid-specific extras here; the backend will

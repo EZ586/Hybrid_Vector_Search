@@ -225,22 +225,27 @@ class HybridBackend(SearchBackend):
         base_step = self._nprobe_step
         base_max = self._nprobe_max
 
-        # start with the backend defaults
+        # start from the backend defaults
         nprobe_start = base_start
         nprobe_step = base_step
         nprobe_max = base_max
 
-        # VERY selective filters (< 1% allowed) → scale ladder UP to chase recall
-        # We don't hard-code absolute numbers; we just scale the configured ones.
+        # Scale the nprobe ladder based on selectivity:
+        #
+        # - VERY selective (< 1% allowed): scale aggressively (2x) to chase recall.
+        # - Moderately selective (1%–25%): keep the base ladder.
+        # - Weakly selective / unfiltered (>= 25%): scale up moderately (1.5x)
+        #   so IVF can touch more lists before early-stop decides we're "stable".
+        scale = 1.0
         if selectivity < 0.01:
-            scale = 2.0  # tune if needed
+            scale = 2.0
+        elif selectivity >= 0.25:
+            scale = 1.5
+
+        if scale != 1.0:
             nprobe_start = max(1, int(base_start * scale))
             nprobe_step = max(1, int(base_step * scale))
             nprobe_max = max(nprobe_start, int(base_max * scale))
-
-        # For other selectivities (>= 1%), we keep the base ladder.
-        # (If you ever want a cheaper ladder for very unselective filters,
-        # you can add an `elif selectivity > 0.5:` branch here that scales DOWN.)
 
         # Never exceed the number of IVF lists in the index
         if self.n_lists is not None:
@@ -269,10 +274,8 @@ class HybridBackend(SearchBackend):
             nprobe_iter=nprobe_iter,
             early_stop_policy=self._early_stop_policy,
             global_bound=self._global_bound,
-            probe_order=probe_order,
-            allowed_counts_per_list=allowed_counts_per_list,
         )
-
+        
         # 6) make sure harness can rely on length K
         if len(ids) < K:
             ids = ids + [-1] * (K - len(ids))
