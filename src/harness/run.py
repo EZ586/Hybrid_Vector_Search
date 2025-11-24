@@ -72,14 +72,12 @@ def get_backend(
 ) -> SearchBackend:
     # special-case hybrid because it uses a persisted FAISS index and reloads metadata
     if name == "hybrid":
-        index_path = RESULTS_ROOT / "indexes" / "faiss_ivf.index"
+        index_path = RESULTS_ROOT / "indexes" / "faiss_hnsw.index"
         metadata_dir = artifacts_root
         return HybridBackend(
             index_path=str(index_path),
             metadata_dir=str(metadata_dir),
-            nprobe_start=1024,
-            nprobe_step=4,
-            nprobe_max=1024,
+            ef_search=128,  # HNSW search depth
         )
 
     if name == "post_filter":
@@ -132,11 +130,7 @@ def main() -> None:
         default=0,
         help="If >0, only run the first N queries from the parquet",
     )
-    ap.add_argument(
-        "--out",
-        required=True,
-        help="Path to JSONL results file to write"
-    )
+    ap.add_argument("--out", required=True, help="Path to JSONL results file to write")
     ap.add_argument(
         "--repeats",
         type=int,
@@ -164,9 +158,7 @@ def main() -> None:
     validate_K(args.K, N)
 
     # backend (now hybrid is supported)
-    backend = get_backend(
-        args.backend, vectors, metadata, artifacts_root=bucket_dir
-    )
+    backend = get_backend(args.backend, vectors, metadata, artifacts_root=bucket_dir)
     run_id = uuid.uuid4().hex[:10]
 
     # queries

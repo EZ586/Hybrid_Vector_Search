@@ -1,30 +1,26 @@
 # src/baselines/hybrid/search.py
 
-from typing import Tuple, List, Dict, Any, Optional
-import numpy as np
+from __future__ import annotations
+from typing import Tuple, List, Dict, Any
 import time
 import heapq
+import numpy as np
 import faiss
 
 
-# ---------------------------------------------------------------------
-# Utility: fast L2 or IP distance
-# ---------------------------------------------------------------------
-def compute_score(qvec, xvec, metric_type):
-    if metric_type == faiss.METRIC_INNER_PRODUCT:
-        return float(np.dot(qvec, xvec))
-    else:
-        diff = qvec - xvec
-        return -float(diff @ diff)   # negative L2
+# -------------------------------------------------------------
+# Compute similarity or negative L2
+# -------------------------------------------------------------
+def compute_score(q, x, metric):
+    if metric == faiss.METRIC_INNER_PRODUCT:
+        return float(np.dot(q, x))
+    diff = q - x
+    return -float(diff @ diff)
 
 
-# ---------------------------------------------------------------------
-# Hybrid HNSW search with:
-#  - metadata allow-list filtering
-#  - early-stop monotonicity (VBase-style)
-#  - top-k heap
-#  - low Python overhead
-# ---------------------------------------------------------------------
+# -------------------------------------------------------------
+# HYBRID HNSW SEARCH (Windows FAISS: flat neighbors buffer)
+# -------------------------------------------------------------
 def hnsw_hybrid_search(
     qvec: np.ndarray,
     index: faiss.IndexHNSWFlat,
@@ -32,171 +28,151 @@ def hnsw_hybrid_search(
     K: int,
     ef_search: int = 128,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    """
-    Custom HNSW search that supports:
-      - metadata allow-list filtering (prefilter)
-      - safe monotonic early-stop
-      - postfiltering
-      - top-K heap
-      - latency + stats
 
-    Args:
-        qvec: (D,) query vector, already normalized for IP if needed
-        index: FAISS HNSW index
-        allow_ids: 1D array of valid IDs
-        K: number of results to return
-        ef_search: maximum frontier expansions (default 128)
-
-    Returns:
-        (top_ids, stats)
-    """
-
-    # ------------------------------------------------------------
+    # --------------------------
     # Handle empty allow-list
-    # ------------------------------------------------------------
+    # --------------------------
     if allow_ids is None or len(allow_ids) == 0:
         return [], {
             "latency_ms": 0.0,
             "scored_vectors": 0,
             "nodes_expanded": 0,
-            "ef_search": None,
+            "ef_search": ef_search,
             "kth_at_stop": None,
-            "bound_at_stop": None,
             "filter_selectivity": 0.0,
-            "notes": "empty allow_ids",
         }
 
     allow_set = set(int(x) for x in allow_ids)
-    metric_type = index.metric_type
 
+    metric = index.metric_type
     qvec = np.asarray(qvec, dtype=np.float32).ravel()
 
     hnsw = index.hnsw
-    entry = hnsw.entry_point
 
-    # ------------------------------------------------------------
-    # Priority queues
-    # frontier = min-heap of (est_dist, node)
-    # top_k = max-heap of (-score, node) (so worst item is top)
-    # ------------------------------------------------------------
-    frontier = []
-    top_k = []  # store (-score, id)
+    # -------------------------------------------------------------
+    # SAFE nb_neighbors across FAISS versions
+    # -------------------------------------------------------------
+    try:
+        # Newer FAISS: requires a layer argument
+        M = hnsw.nb_neighbors(0)
+    except TypeError:
+        # Older FAISS: attribute or no-arg method
+        if callable(hnsw.nb_neighbors):
+            M = hnsw.nb_neighbors()
+        else:
+            M = hnsw.nb_neighbors
 
+    # -------------------------------------------------------------
+    # Convert SWIG Int32Vector → NumPy (Windows FAISS)
+    # -------------------------------------------------------------
+    try:
+        # Windows FAISS CPU wheels usually provide this:
+        neighbors_flat = faiss.rev_int32_swig_ptr(hnsw.neighbors, index.ntotal * M)
+    except AttributeError:
+        # Fallback: generic rev_swig_ptr
+        neighbors_flat = faiss.rev_swig_ptr(hnsw.neighbors, index.ntotal * M)
+
+    frontier = []      # min-heap of (bound, node)
     visited = set()
+    top_k = []         # max-heap of (-score, id)
+
+    # --------------------------
+    # Start from entry point
+    # --------------------------
+    entry = hnsw.entry_point
+    entry_vec = index.reconstruct(entry)
+    entry_s = compute_score(qvec, entry_vec, metric)
+    entry_b = -entry_s if metric == faiss.METRIC_INNER_PRODUCT else entry_s
+    heapq.heappush(frontier, (entry_b, entry))
+
+    start = time.perf_counter()
     expansions = 0
 
-    # ------------------------------------------------------------
-    # Push entry point
-    # ------------------------------------------------------------
-    entry_vec = index.reconstruct(entry)
-    entry_score = compute_score(qvec, entry_vec, metric_type)
-    heapq.heappush(frontier, ( -entry_score if metric_type == faiss.METRIC_INNER_PRODUCT else entry_score, entry))
-
-    # ------------------------------------------------------------
-    # Main search loop
-    # ------------------------------------------------------------
-    start_time = time.perf_counter()
-
+    # --------------------------
+    # Main HNSW search
+    # --------------------------
     while frontier and expansions < ef_search:
-
-        est_bound, node = heapq.heappop(frontier)
+        bound, node = heapq.heappop(frontier)
         expansions += 1
 
-        # Early-stop condition:
-        #  We can stop when the best remaining frontier bound
-        #  cannot beat the current worst top-k score.
-        if len(top_k) >= K:
-            worst_top_k = -top_k[0][0]
-
-            # est_bound is stored as:
-            #   IP: -score (because smaller is better when negated)
-            #   L2: actual distance (smaller is better)
-            if metric_type == faiss.METRIC_INNER_PRODUCT:
-                # est_bound = -(possible_score), so est_bound > -worst_top_k → stop
-                if est_bound > -worst_top_k:
-                    break
-            else:
-                # L2: est_bound = real dist, early-stop when est_bound > worst_top_k
-                if est_bound > worst_top_k:
-                    break
-
-        # Skip duplicates
         if node in visited:
             continue
         visited.add(node)
 
-        # Retrieve real vector
+        # score this node
         vec = index.reconstruct(node)
-        score = compute_score(qvec, vec, metric_type)
+        s = compute_score(qvec, vec, metric)
 
-        # Metadata prefilter: only score if allowed
+        # allow-list filtering
         if node in allow_set:
             if len(top_k) < K:
-                heapq.heappush(top_k, (-score, node))
+                heapq.heappush(top_k, (-s, node))
             else:
-                # if this score is better than worst-top-k, replace it
-                if score > -top_k[0][0]:   # because stored as (-score)
-                    heapq.heapreplace(top_k, (-score, node))
+                if s > -top_k[0][0]:   # better than current worst
+                    heapq.heapreplace(top_k, (-s, node))
 
-        # Expand neighbors
-        neighbors = hnsw.neighbors(node)
-        for nb in neighbors:
-            if nb == -1:
+        # --------------------------
+        # Early-stop condition
+        # --------------------------
+        if len(top_k) == K and frontier:
+            worst = -top_k[0][0]  # lowest score in top-k
+
+            if metric == faiss.METRIC_INNER_PRODUCT:
+                if frontier[0][0] > -worst:
+                    break
+            else:
+                if frontier[0][0] > worst:
+                    break
+
+        # ---------------------------------------------------------
+        # Expand neighbors from flat buffer
+        # neighbors_flat is a single Int32 array of length ntotal * M
+        # neighbors for node i are at:
+        #   neighbors_flat[i*M : i*M + M]
+        # ---------------------------------------------------------
+        start_i = node * M
+        end_i = start_i + M
+        node_neighbors = neighbors_flat[start_i:end_i]
+
+        for nb in node_neighbors:
+            if nb < 0:
                 continue
-            if nb not in visited:
-                # frontier bound uses real distance or negative score
-                nb_vec = index.reconstruct(nb)
-                nb_score = compute_score(qvec, nb_vec, metric_type)
+            if nb in visited:
+                continue
 
-                if metric_type == faiss.METRIC_INNER_PRODUCT:
-                    bound = -nb_score
-                else:
-                    bound = nb_score
+            nb_vec = index.reconstruct(nb)
+            nb_s = compute_score(qvec, nb_vec, metric)
 
-                heapq.heappush(frontier, (bound, nb))
+            if metric == faiss.METRIC_INNER_PRODUCT:
+                nb_b = -nb_s
+            else:
+                nb_b = nb_s
 
-    # ------------------------------------------------------------
-    # Build output
-    # ------------------------------------------------------------
-    latency_ms = (time.perf_counter() - start_time) * 1000.0
+            heapq.heappush(frontier, (nb_b, nb))
 
-    # Extract top K
-    results = []
-    while top_k:
-        neg_score, idx = heapq.heappop(top_k)
-        results.append((idx, -neg_score))
+    # --------------------------
+    # Build top-K output
+    # --------------------------
+    results = [(nid, -s) for (s, nid) in top_k]
     results.sort(key=lambda x: x[1], reverse=True)
-    top_ids = [x[0] for x in results[:K]]
-    kth_at_stop = results[K-1][1] if len(results) >= K else None
+
+    top_ids = [nid for nid, _ in results[:K]]
+    kth = results[K-1][1] if len(results) >= K else None
 
     stats = {
-        "latency_ms": latency_ms,
+        "latency_ms": (time.perf_counter() - start) * 1000.0,
         "scored_vectors": len(results),
         "nodes_expanded": expansions,
         "ef_search": ef_search,
-        "kth_at_stop": kth_at_stop,
-        "bound_at_stop": None,  # frontier bound not tracked separately
-        "filter_selectivity": len(allow_ids) / index.ntotal if index.ntotal > 0 else None,
-        "notes": None,
+        "kth_at_stop": kth,
+        "filter_selectivity": len(allow_ids) / index.ntotal,
     }
 
     return top_ids, stats
 
 
-# ---------------------------------------------------------------------
-# Backward-compatible API
-# ---------------------------------------------------------------------
-def hybrid_search(
-    qvec: np.ndarray,
-    index: faiss.IndexHNSWFlat,
-    allow_ids: np.ndarray,
-    K: int,
-    nprobe_iter=None,   # ignored for HNSW, kept for compatibility
-    **kwargs
-):
-    """
-    For compatibility with your earlier IVF API.
-
-    Delegates to the new HNSW search.
-    """
+# -------------------------------------------------------------
+# Compatibility wrapper
+# -------------------------------------------------------------
+def hybrid_search(qvec, index, allow_ids, K, **kwargs):
     return hnsw_hybrid_search(qvec, index, allow_ids, K, ef_search=128)
