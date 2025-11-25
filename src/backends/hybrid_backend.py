@@ -21,6 +21,7 @@ from src.baselines.hybrid.early_stop import get_early_stop_policy
 from src.dataio.loaders import load_metadata
 
 from src.backends.backend_interface import SearchBackend
+import time
 
 DEFAULT_METADATA_ROOT = "/artifacts"
 DEFAULT_METADATA_BUCKET = "v2"
@@ -176,6 +177,7 @@ class HybridBackend(SearchBackend):
             stats: dict with latency_ms, scored_vectors, lists_probed, nprobe, backend, ...
         """
         # 1) build allow_ids from filters; if no filters, allow all
+        start=time.time()
         if not filters:
             allow_ids = self._all_ids
         else:
@@ -275,13 +277,14 @@ class HybridBackend(SearchBackend):
             early_stop_policy=self._early_stop_policy,
             global_bound=self._global_bound,
         )
-        
+        latency_ms = (time.time() - start) * 1000.0
         # 6) make sure harness can rely on length K
         if len(ids) < K:
             ids = ids + [-1] * (K - len(ids))
 
         # 7) tag backend name + hybrid-specific flags for logging
         stats["backend"] = self.name
+        stats["latency_ms"]=latency_ms
 
         # hybrid-specific extras expected by run.py
         extras = {
