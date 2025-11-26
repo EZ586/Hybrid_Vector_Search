@@ -46,7 +46,7 @@ plt.legend()
 plt.grid(True, linestyle='--', alpha=0.6)
 
 # === Export plot ===
-Path("results/week2").mkdir(parents=True, exist_ok=True)
+Path("results/week").mkdir(parents=True, exist_ok=True)
 output_path = "results/week2/latency_selectivity.png"
 plt.savefig(output_path, dpi=300, bbox_inches="tight")
 plt.show()

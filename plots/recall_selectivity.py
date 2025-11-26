@@ -4,8 +4,8 @@ import statsmodels.api as sm
 from pathlib import Path
 
 # === 1. Load the jsonl files ===
-df_post = pd.read_json("results/week2/post_results.jsonl", lines=True)
-df_pre = pd.read_json("results/week2/pre_results.jsonl", lines=True)
+df_post = pd.read_json("results/week6/post_filter_shared_ivf.jsonl", lines=True)
+df_pre = pd.read_json("results/week6/pre_results.jsonl", lines=True)
 
 # === 2. Average over trials for each qid ===
 # post
@@ -57,7 +57,7 @@ plt.grid(True, linestyle="--", alpha=0.6)
 
 # === 5. Export ===
 Path("result/week2").mkdir(parents=True, exist_ok=True)
-outpath = "results/week2/recall_selectivity.png"
+outpath = "results/week6/recall_selectivity.png"
 plt.savefig(outpath, dpi=300, bbox_inches="tight")
 plt.show()
 
