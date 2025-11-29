@@ -110,7 +110,6 @@ def hybrid_search(
 
         # search with selector enforced
         D, I = index.search(qvec, search_k, params=params)
-
         # count how many vectors FAISS actually returned (non -1)
         returned_ids = I[0]
         returned_dists = D[0]

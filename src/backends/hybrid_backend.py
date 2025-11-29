@@ -5,17 +5,9 @@ import os
 import numpy as np
 import faiss
 
-from src.baselines.hybrid.index import (
-    load_ivf_index,
-    DEFAULT_INDEX_PATH,       # new default
-    DEFAULT_FULL_INDEX_PATH,  # backward compat
-    get_ivf_centroids,
-    get_ivf_id_to_list_map,
-)
 from src.baselines.hybrid.search import hybrid_search
 from src.baselines.hybrid.selector import make_allowlist
 from src.baselines.hybrid.scheduler import linear_nprobe_scheduler
-from src.baselines.hybrid.list_ordering import build_probe_order
 from src.baselines.hybrid.early_stop import get_early_stop_policy
 
 from src.dataio.loaders import load_metadata
@@ -36,7 +28,6 @@ class HybridBackend(SearchBackend):
     - loads canonical metadata from /artifacts/v2/ via dataio.loaders
     - materializes allow-lists from JSON-style filters (using baselines.hybrid.selector)
     - computes per-list allowed counts (if possible)
-    - optionally builds a list probe order (using list_ordering)
     - optionally applies an early-stop policy over probes
     - runs the predicate-aware ANN loop from baselines.hybrid.search
     - returns (ids, stats) in a harness-friendly shape
@@ -46,34 +37,17 @@ class HybridBackend(SearchBackend):
 
     def __init__(
         self,
-        index_path: str = DEFAULT_INDEX_PATH,
-        metadata_dir: str = os.path.join(DEFAULT_METADATA_ROOT, DEFAULT_METADATA_BUCKET),
+        index_path: str,
+        metadata_dir: str,
         nprobe_start: int = 4,
         nprobe_step: int = 4,
-        nprobe_max: Optional[int] = None,
-        *,
-        hybrid_use_ordering: bool = False,
+        nprobe_max: int = 1024,
         hybrid_early_stop: Optional[str] = None,
-        hybrid_global_bound: Optional[float] = None,
     ) -> None:
         # 1) load FAISS IVF index
-        # allow older code that still passes DEFAULT_FULL_INDEX_PATH
-        if not os.path.exists(index_path) and os.path.exists(DEFAULT_FULL_INDEX_PATH):
-            index_path = DEFAULT_FULL_INDEX_PATH
-
-        if not os.path.exists(index_path):
-            raise FileNotFoundError(
-                f"HybridBackend: index not found at {index_path}. "
-                "Build it first with baselines.hybrid.index.build_ivf_index_from_artifacts(...)."
-            )
-        self.index: faiss.IndexIVFFlat = load_ivf_index(index_path)
+        self.index = faiss.read_index(index_path)
 
         # 2) load canonical metadata (for filters → allow_ids) using the official loader
-        if not os.path.exists(metadata_dir):
-            raise FileNotFoundError(
-                f"HybridBackend: metadata dir not found at {metadata_dir}. "
-                "Make sure /artifacts/v2/ exists and was generated."
-            )
         self.metadata_df = load_metadata(metadata_dir)
 
         # precompute all ids for the “no filter” case
@@ -84,76 +58,15 @@ class HybridBackend(SearchBackend):
         self._nprobe_step = nprobe_step
         self._nprobe_max: Optional[int] = nprobe_max
 
-        # 4) hybrid-specific knobs
-        self._use_ordering: bool = bool(hybrid_use_ordering)
         # store both the name and the callable for logging + execution
         self._early_stop_name: Optional[str] = hybrid_early_stop
         self._early_stop_policy = get_early_stop_policy(hybrid_early_stop)
-        self._global_bound: Optional[float] = hybrid_global_bound
 
-        # 5) IVF internals (Person A: Task A1)
-        # These helpers are expected to return:
-        #   centroids: (L, D)
-        #   id_to_list: (N,) mapping each id -> list_id or -1
-        try:
-            self.ivf_centroids: Optional[np.ndarray] = get_ivf_centroids(self.index)
-        except Exception:
-            self.ivf_centroids = None
-
-        try:
-            self.id_to_list: Optional[np.ndarray] = get_ivf_id_to_list_map(self.index)
-        except Exception:
-            self.id_to_list = None
-
-        self.n_lists: Optional[int] = None
-        if self.ivf_centroids is not None:
-            self.n_lists = int(self.ivf_centroids.shape[0])
+        self.n_lists = self.index.nlist
 
         # If caller did not specify nprobe_max, default to "all lists"
         if self._nprobe_max is None:
-            if self.n_lists is not None:
-                self._nprobe_max = int(self.n_lists)
-            else:
-                # Fallback if IVF internals are unavailable for some reason
-                self._nprobe_max = 64
-
-    # ------------------------------------------------------------------ #
-    # internal helpers
-    # ------------------------------------------------------------------ #
-    def _compute_allowed_counts_per_list(self, allow_ids: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Map allow_ids to IVF lists and count how many allowed ids fall in each list.
-
-        Returns:
-            allowed_counts_per_list: (L,) int64 or None if we can't compute it.
-        """
-        if (
-            self.id_to_list is None
-            or self.n_lists is None
-            or allow_ids.size == 0
-        ):
-            return None
-
-        # Ensure int64 for safe indexing
-        allow_ids = np.asarray(allow_ids, dtype=np.int64)
-
-        # Guard against ids out of range, though this shouldn't happen
-        max_id = self.id_to_list.shape[0] - 1
-        safe_mask = (allow_ids >= 0) & (allow_ids <= max_id)
-        if not np.any(safe_mask):
-            return np.zeros(self.n_lists, dtype=np.int64)
-
-        list_ids = self.id_to_list[allow_ids[safe_mask]]
-        valid_mask = list_ids >= 0
-        if not np.any(valid_mask):
-            return np.zeros(self.n_lists, dtype=np.int64)
-
-        counts = np.bincount(
-            list_ids[valid_mask],
-            minlength=self.n_lists,
-        ).astype(np.int64, copy=False)
-        return counts
-
+            self._nprobe_max = int(self.n_lists)
     # ------------------------------------------------------------------ #
     # required by SearchBackend
     # ------------------------------------------------------------------ #
@@ -186,41 +99,11 @@ class HybridBackend(SearchBackend):
             if allow_ids.size == 0:
                 allow_ids = np.empty((0,), dtype=np.int64)
 
-        # 2) per-query allowed counts per list (Person A: Task A2)
-        allowed_counts_per_list: Optional[np.ndarray] = self._compute_allowed_counts_per_list(
-            allow_ids
-        )
-
-        # 3) optional probe-order (Person B)
-        probe_order = None
-        if (
-            self._use_ordering
-            and self.ivf_centroids is not None
-            and self.n_lists is not None
-            and self.n_lists > 0
-        ):
-            try:
-                probe_order = build_probe_order(
-                    qvec=qvec,
-                    centroids=self.ivf_centroids,
-                    allowed_counts=allowed_counts_per_list,
-                )
-            except Exception:
-                # If anything goes wrong, just fall back silently
-                probe_order = None
-
-        # 4) build a per-query adaptive nprobe scheduler (no magic constants)
-        #
-        # We adjust the ladder based on filter selectivity, but only by
-        # scaling the backend's configured (start, step, max) values.
-        #
-        #   selectivity = |allow_ids| / |all_ids|
+        # calculate selectivity
         total_ids = self._all_ids.size if self._all_ids is not None else 0
+        selectivity = 0
         if total_ids > 0:
             selectivity = float(allow_ids.size) / float(total_ids)
-        else:
-            # degenerate case; treat as unfiltered
-            selectivity = 1.0
 
         # backend defaults (set in __init__)
         base_start = self._nprobe_start
@@ -232,17 +115,12 @@ class HybridBackend(SearchBackend):
         nprobe_step = base_step
         nprobe_max = base_max
 
-        # Scale the nprobe ladder based on selectivity:
-        #
-        # - VERY selective (< 1% allowed): scale aggressively (2x) to chase recall.
-        # - Moderately selective (1%–25%): keep the base ladder.
-        # - Weakly selective / unfiltered (>= 25%): scale up moderately (1.5x)
-        #   so IVF can touch more lists before early-stop decides we're "stable".
+        # Scale nprobe ladder based on selectivity:
         scale = 1.0
         if selectivity < 0.01:
             scale = 2.0
         elif selectivity >= 0.25:
-            scale = 1.5
+            scale = 300
 
         if scale != 1.0:
             nprobe_start = max(1, int(base_start * scale))
@@ -250,21 +128,15 @@ class HybridBackend(SearchBackend):
             nprobe_max = max(nprobe_start, int(base_max * scale))
 
         # Never exceed the number of IVF lists in the index
-        if self.n_lists is not None:
-            nprobe_max = min(nprobe_max, int(self.n_lists))
+        nprobe_start = min(nprobe_start, int(self.n_lists))
+        nprobe_max = min(nprobe_max, int(self.n_lists))
 
-        # If we know which lists contain at least one allowed id, we can also
-        # clamp nprobe_max so we don't waste probes on predicate-empty lists.
-        if allowed_counts_per_list is not None:
-            useful_lists = int(np.count_nonzero(allowed_counts_per_list > 0))
-            if useful_lists > 0:
-                nprobe_max = min(nprobe_max, useful_lists)
 
         # Finally, build the iterator
         nprobe_iter = linear_nprobe_scheduler(
             start=nprobe_start,
             step=nprobe_step,
-            max_nprobe=nprobe_max,
+            max_nprobe=1024,
         )
 
         # 5) run the predicate-aware ANN loop
@@ -275,7 +147,6 @@ class HybridBackend(SearchBackend):
             K=K,
             nprobe_iter=nprobe_iter,
             early_stop_policy=self._early_stop_policy,
-            global_bound=self._global_bound,
         )
         latency_ms = (time.time() - start) * 1000.0
         # 6) make sure harness can rely on length K
@@ -287,12 +158,8 @@ class HybridBackend(SearchBackend):
         stats["latency_ms"]=latency_ms
 
         # hybrid-specific extras expected by run.py
-        extras = {
-            "has_probe_order": bool(probe_order is not None),
-            "has_allowed_counts_per_list": bool(allowed_counts_per_list is not None),
+        stats["extras"] = {
             "early_stop_policy": self._early_stop_name,
-            "global_bound": self._global_bound,
         }
-        stats["extras"] = extras
 
         return ids, stats

@@ -228,52 +228,6 @@ def get_ivf_list_sizes(index: faiss.IndexIVFFlat) -> np.ndarray:
     return list_sizes
 
 
-def get_ivf_id_to_list_map(
-    index: faiss.IndexIVFFlat,
-    ntotal: Optional[int] = None,
-) -> np.ndarray:
-    """
-    Build an array mapping each vector ID to its IVF list id.
-
-    Args:
-        index: faiss.IndexIVFFlat built with add_with_ids(...).
-        ntotal: optional total number of vectors (defaults to index.ntotal).
-
-    Returns:
-        id_to_list: (N,) int64 array where id_to_list[i] = list id (0..L-1)
-                    that currently contains vector i, or -1 if not present.
-
-    Notes:
-        - This is useful for per-query "allowed_counts_per_list" calculations.
-        - We rely on FAISS's inverted lists; this should only be called on
-          trained, populated IVF indices.
-    """
-    if not isinstance(index, faiss.IndexIVFFlat):
-        raise TypeError("get_ivf_id_to_list_map currently supports faiss.IndexIVFFlat only")
-
-    ivf = faiss.extract_index_ivf(index)
-    invlists = ivf.invlists
-    if invlists is None:
-        raise RuntimeError("Index has no inverted lists; has it been populated?")
-
-    nlist = int(index.nlist)
-    if ntotal is None:
-        ntotal = int(index.ntotal)
-
-    id_to_list = np.full(ntotal, -1, dtype=np.int64)
-
-    for lid in range(nlist):
-        sz = invlists.list_size(lid)
-        if sz == 0:
-            continue
-        ids_ptr = invlists.get_ids(lid)
-        ids = faiss.rev_swig_ptr(ids_ptr, sz)
-        # ids are the explicit IDs we added (0..N-1), so they can be used as indices
-        id_to_list[ids] = lid
-
-    return id_to_list
-
-
 __all__ = [
     "build_ivf_index",
     "build_ivf_index_from_artifacts",
@@ -283,5 +237,4 @@ __all__ = [
     # IVF internals
     "get_ivf_centroids",
     "get_ivf_list_sizes",
-    "get_ivf_id_to_list_map",
 ]

@@ -8,6 +8,10 @@ import uuid
 import json
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
+# Collect rows for plotting (instead of later reading JSONL)
+_PLOT_ROWS = []
 
 from src.backends.exact_backend import ExactBackend
 from src.backends.prefilter_backend import PreFilterBackend
@@ -71,23 +75,14 @@ def get_backend(
     name: str,
     vectors: np.ndarray,
     metadata: pd.DataFrame,
-    *,
     artifacts_root: Path,
-    # hybrid-specific knobs (optional; ignored by non-hybrid backends)
-    hybrid_use_ordering: bool = False,
-    hybrid_early_stop: str | None = None,
-    hybrid_global_bound: float | None = None,
+    hybrid_early_stop: str | None = None
 ) -> SearchBackend:
     """
     Construct a backend by name.
 
     For 'hybrid', additional controls are available:
-
-      - hybrid_use_ordering: if True, HybridBackend will attempt to pass
-        list-ordering information down to the search layer.
       - hybrid_early_stop: optional policy name string (e.g. "k_and_bound").
-      - hybrid_global_bound: optional float bound for early stop policies.
-
     Non-hybrid backends ignore these options.
     """
     # special-case hybrid because it uses a persisted FAISS index and reloads metadata
@@ -100,9 +95,7 @@ def get_backend(
             nprobe_start=16,
             nprobe_step=4,
             nprobe_max=None,  # let HybridBackend infer from index.nlist
-            hybrid_use_ordering=hybrid_use_ordering,
             hybrid_early_stop=hybrid_early_stop,
-            hybrid_global_bound=hybrid_global_bound,
         )
 
     if name == "post_filter":
@@ -171,28 +164,11 @@ def main() -> None:
     # Hybrid-specific CLI flags (Person A – Task A4)
     # ----------------------------
     ap.add_argument(
-        "--hybrid-use-ordering",
-        action="store_true",
-        help=(
-            "Enable hybrid list ordering (if supported by the hybrid backend). "
-            "Ignored for non-hybrid backends."
-        ),
-    )
-    ap.add_argument(
         "--hybrid-early-stop",
         type=str,
         default=None,
         help=(
             "Name of early-stop policy for hybrid backend (e.g. 'k_and_bound'). "
-            "Ignored for non-hybrid backends."
-        ),
-    )
-    ap.add_argument(
-        "--hybrid-global-bound",
-        type=float,
-        default=None,
-        help=(
-            "Optional global score bound for hybrid early-stop policies. "
             "Ignored for non-hybrid backends."
         ),
     )
@@ -223,9 +199,6 @@ def main() -> None:
         vectors,
         metadata,
         artifacts_root=bucket_dir,
-        hybrid_use_ordering=args.hybrid_use_ordering,
-        hybrid_early_stop=args.hybrid_early_stop,
-        hybrid_global_bound=args.hybrid_global_bound,
     )
     run_id = uuid.uuid4().hex[:10]
 
@@ -342,8 +315,40 @@ def main() -> None:
                     "early_stop_policy", None
                 )
                 out_row["hybrid_global_bound"] = extras.get("global_bound", None)
-
+            # Store row for plotting later
+            _PLOT_ROWS.append(out_row)
             append_jsonl(out_row, out_path)
+    # ----------------------------
+    # Generate plots
+    # ----------------------------
+    if len(_PLOT_ROWS) > 0:
+        df_plot = pd.DataFrame(_PLOT_ROWS)
+
+        # --- Selectivity vs Latency ---
+        plt.figure(figsize=(8,6))
+        plt.scatter(df_plot["filter_selectivity"], df_plot["latency_ms"], s=12)
+        plt.xlabel("Filter Selectivity")
+        plt.ylabel("Latency (ms)")
+        plt.title("Selectivity vs Latency")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(str(out_path) + "_selectivity_vs_latency.png")
+        plt.close()
+
+        # --- Selectivity vs Recall ---
+        plt.figure(figsize=(8,6))
+        plt.scatter(df_plot["filter_selectivity"], df_plot["recall_at_k"], s=12)
+        plt.xlabel("Filter Selectivity")
+        plt.ylabel("Recall@K")
+        plt.title("Selectivity vs Recall")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(str(out_path) + "_selectivity_vs_recall.png")
+        plt.close()
+
+        print(f"[PLOT] Saved plots next to results:")
+        print("   →", str(out_path) + "_selectivity_vs_latency.png")
+        print("   →", str(out_path) + "_selectivity_vs_recall.png")
 
     print(
         f"[OK] {len(qdf)} queries from '{args.artifacts}' via '{args.backend}' → {args.out}"
