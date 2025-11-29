@@ -120,7 +120,7 @@ class HybridBackend(SearchBackend):
         if selectivity < 0.01:
             scale = 2.0
         elif selectivity >= 0.30 and selectivity <= 0.70:
-            scale = 3.0
+            scale = 20
 
         if scale != 1.0:
             nprobe_start = max(1, int(base_start * scale))
