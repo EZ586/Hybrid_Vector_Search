@@ -38,9 +38,33 @@ def linear_nprobe_scheduler(
         yield current
         current += step
 
+def geometric_nprobe_scheduler(
+    start: int = 4,
+    factor: float = 2.0,
+    max_nprobe: int = 64,
+):
+    """
+    Yield nprobe values growing roughly geometrically from `start` to `max_nprobe`.
+
+    Example (start=16, factor=2, max_nprobe=256):
+        16, 32, 64, 128, 256
+    """
+    if start < 1:
+        raise ValueError("start must be >= 1")
+    if factor <= 1.0:
+        raise ValueError("factor must be > 1.0")
+    if max_nprobe < start:
+        return
+
+    current = start
+    while current <= max_nprobe:
+        yield int(current)
+        current *= factor
+
 __all__ = [
     "linear_nprobe_scheduler",
     "linear_list_budget_scheduler",
+    "geometric_nprobe_scheduler",
 ]
 
 def linear_list_budget_scheduler(

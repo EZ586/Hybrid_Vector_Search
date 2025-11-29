@@ -121,29 +121,33 @@ def stop_when_k_and_stable(state: SearchState) -> Tuple[bool, Optional[str]]:
     kth_history: List[float] = state.get("kth_history") or []
     probe_index: int = state.get("probe_index", 0)
 
-    # Defaults: require at least 3 probes and use a 3-step stability window
-    window: int = state.get("window", 3)
-    epsilon: float = state.get("epsilon", 1e-3)
-    min_probes: int = state.get("min_probes", 3)
+    # Defaults: more conservative than before
+    window: int = state.get("window", 5)        # was 3/4
+    epsilon: float = state.get("epsilon", 1e-4) # tighter tolerance
+    min_probes: int = state.get("min_probes", 8)
+    # Require at least 2K candidates so we have some "slack"
+    min_candidates: int = state.get("min_candidates", 2 * K if K is not None else 0)
 
-    if K is None or num_candidates < K:
+    if K is None:
         return False, None
 
-    # Do not allow early-stop before we've run enough probes
+    # Need enough candidates and probes before we even *consider* stopping
+    if num_candidates < max(K, min_candidates):
+        return False, None
+
     if probe_index < min_probes:
         return False, None
 
-    # need at least `window` points to judge stability
     if len(kth_history) < window:
         return False, None
 
-    # compare oldest vs newest in the window
     recent = kth_history[-window:]
     oldest = recent[0]
     newest = recent[-1]
+    improvement = newest - oldest
 
-    # if newest is not much better than oldest, we say it's stable
-    if (newest - oldest) <= epsilon:
+    # Only treat as stable if kth hasn't dropped and hasn't improved much
+    if improvement >= 0.0 and improvement <= epsilon:
         return True, "k_and_stable"
 
     return False, None

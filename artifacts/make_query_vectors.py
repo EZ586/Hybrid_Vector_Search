@@ -53,7 +53,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--bucket_dir",
-        default="artifacts/v2",
+        default="artifacts/v3",
         help="Artifact bucket containing queries.parquet and vectors.meta.json",
     )
     ap.add_argument(

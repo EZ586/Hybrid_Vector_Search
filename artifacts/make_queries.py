@@ -10,7 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # Use your exact-on-table selectivity
-from eval.selectivity import compute_selectivity
+from src.eval.selectivity import compute_selectivity
 
 
 # ----------------------------
@@ -157,12 +157,12 @@ def _has_none_or_multiops(d: Any) -> bool:
 # ----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bucket_dir", default="artifacts/v2",
+    ap.add_argument("--bucket_dir", default="artifacts/v3",
                     help="Directory containing metadata.parquet; queries.parquet will be written here.")
     ap.add_argument("--out", default=None, help="Override output path for queries.parquet")
     ap.add_argument("--per_bucket", type=int, default=12,
                     help="# queries to keep per selectivity bucket")
-    ap.add_argument("--buckets", default="0.01,0.02,0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0",
+    ap.add_argument("--buckets", default="0.70,0.75,0.80,0.85,0.90,0.95,1.00",
                     help="Comma-separated selectivity targets in (0,1]")
     ap.add_argument("--tolerance", type=float, default=0.15,
                     help="Relative tolerance around each bucket target (e.g., 0.15 = ±15%)")

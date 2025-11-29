@@ -14,7 +14,7 @@ from src.baselines.hybrid.index import (
 )
 from src.baselines.hybrid.search import hybrid_search
 from src.baselines.hybrid.selector import make_allowlist
-from src.baselines.hybrid.scheduler import linear_nprobe_scheduler
+from src.baselines.hybrid.scheduler import linear_nprobe_scheduler, geometric_nprobe_scheduler
 from src.baselines.hybrid.list_ordering import build_probe_order
 from src.baselines.hybrid.early_stop import get_early_stop_policy
 
@@ -24,7 +24,7 @@ from src.backends.backend_interface import SearchBackend
 import time
 
 DEFAULT_METADATA_ROOT = "/artifacts"
-DEFAULT_METADATA_BUCKET = "v2"
+DEFAULT_METADATA_BUCKET = "v3"
 
 
 class HybridBackend(SearchBackend):
@@ -33,7 +33,7 @@ class HybridBackend(SearchBackend):
 
     This backend:
     - loads a persisted IVF index (by default from /results/indexes/faiss_ivf.index)
-    - loads canonical metadata from /artifacts/v2/ via dataio.loaders
+    - loads canonical metadata from /artifacts/v3/ via dataio.loaders
     - materializes allow-lists from JSON-style filters (using baselines.hybrid.selector)
     - computes per-list allowed counts (if possible)
     - optionally builds a list probe order (using list_ordering)
@@ -72,7 +72,7 @@ class HybridBackend(SearchBackend):
         if not os.path.exists(metadata_dir):
             raise FileNotFoundError(
                 f"HybridBackend: metadata dir not found at {metadata_dir}. "
-                "Make sure /artifacts/v2/ exists and was generated."
+                "Make sure /artifacts/v3/ exists and was generated."
             )
         self.metadata_df = load_metadata(metadata_dir)
 
@@ -111,10 +111,10 @@ class HybridBackend(SearchBackend):
 
         # If caller did not specify nprobe_max, default to "all lists"
         if self._nprobe_max is None:
-            if self.n_lists is not None:
-                self._nprobe_max = int(self.n_lists)
+            if self.ivf_centroids is not None:
+                # Cap max nprobe to avoid probing every single list by default.
+                self._nprobe_max = min(int(self.n_lists), 256)
             else:
-                # Fallback if IVF internals are unavailable for some reason
                 self._nprobe_max = 64
 
     # ------------------------------------------------------------------ #
@@ -241,9 +241,7 @@ class HybridBackend(SearchBackend):
         scale = 1.0
         if selectivity < 0.01:
             scale = 2.0
-        elif selectivity >= 0.25:
-            scale = 1.5
-
+            
         if scale != 1.0:
             nprobe_start = max(1, int(base_start * scale))
             nprobe_step = max(1, int(base_step * scale))
@@ -260,10 +258,16 @@ class HybridBackend(SearchBackend):
             if useful_lists > 0:
                 nprobe_max = min(nprobe_max, useful_lists)
 
+        # Softer selectivity-based cap: only clamp *very* broad filters.
+        # For 0.70–0.95 selectivity, rely on the global nprobe_max + early stop.
+        if selectivity >= 0.95:
+            nprobe_max = min(nprobe_max, 128)
+
         # Finally, build the iterator
-        nprobe_iter = linear_nprobe_scheduler(
+       # Use a geometric ladder to reach high nprobe with fewer probes.
+        nprobe_iter = geometric_nprobe_scheduler(
             start=nprobe_start,
-            step=nprobe_step,
+            factor=2.0,
             max_nprobe=nprobe_max,
         )
 

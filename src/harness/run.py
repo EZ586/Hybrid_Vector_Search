@@ -140,7 +140,7 @@ def main() -> None:
     ap.add_argument(
         "--artifacts",
         default="v1",
-        choices=["v1", "v2"],
+        choices=["v1", "v2", "v3"],
         help="Which artifact bucket under ./artifacts/ to use",
     )
     ap.add_argument(
@@ -236,7 +236,7 @@ def main() -> None:
 
     # v2 may have pre-embedded query vectors
     query_vectors = None
-    if args.artifacts == "v2":
+    if args.artifacts in ("v2", "v3"):
         qv_path = bucket_dir / "query_vectors.npy"
         if not qv_path.exists():
             raise FileNotFoundError(
