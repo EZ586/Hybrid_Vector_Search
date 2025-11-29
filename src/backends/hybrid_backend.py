@@ -119,8 +119,8 @@ class HybridBackend(SearchBackend):
         scale = 1.0
         if selectivity < 0.01:
             scale = 2.0
-        elif selectivity >= 0.25:
-            scale = 300
+        elif selectivity >= 0.30 and selectivity <= 0.70:
+            scale = 3.0
 
         if scale != 1.0:
             nprobe_start = max(1, int(base_start * scale))
@@ -136,7 +136,7 @@ class HybridBackend(SearchBackend):
         nprobe_iter = linear_nprobe_scheduler(
             start=nprobe_start,
             step=nprobe_step,
-            max_nprobe=1024,
+            max_nprobe=nprobe_max,
         )
 
         # 5) run the predicate-aware ANN loop

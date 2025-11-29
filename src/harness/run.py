@@ -199,6 +199,7 @@ def main() -> None:
         vectors,
         metadata,
         artifacts_root=bucket_dir,
+        hybrid_early_stop=args.hybrid_early_stop,
     )
     run_id = uuid.uuid4().hex[:10]
 
