@@ -92,13 +92,13 @@ def get_backend(
     """
     # special-case hybrid because it uses a persisted FAISS index and reloads metadata
     if name == "hybrid":
-        index_path = RESULTS_ROOT / "indexes" / "faiss_ivf.index"
+        index_path = RESULTS_ROOT / "indexes" / "faiss_ivf_512.index"
         metadata_dir = artifacts_root
         return HybridBackend(
             index_path=str(index_path),
             metadata_dir=str(metadata_dir),
-            nprobe_start=16,
-            nprobe_step=4,
+            nprobe_start=32,
+            nprobe_step=16,
             nprobe_max=None,  # let HybridBackend infer from index.nlist
             hybrid_use_ordering=hybrid_use_ordering,
             hybrid_early_stop=hybrid_early_stop,
@@ -140,7 +140,7 @@ def main() -> None:
     ap.add_argument(
         "--artifacts",
         default="v1",
-        choices=["v1", "v2"],
+        choices=["v1", "v2","v3-strict"],
         help="Which artifact bucket under ./artifacts/ to use",
     )
     ap.add_argument(
@@ -236,7 +236,7 @@ def main() -> None:
 
     # v2 may have pre-embedded query vectors
     query_vectors = None
-    if args.artifacts == "v2":
+    if args.artifacts == "v3-strict":
         qv_path = bucket_dir / "query_vectors.npy"
         if not qv_path.exists():
             raise FileNotFoundError(

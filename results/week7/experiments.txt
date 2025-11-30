@@ -1,0 +1,43 @@
+run 1:
+    nprobe_start=16,
+    nprobe_step=4,
+    stop: k_and_stable,
+
+run 2:
+    nprobe_start=32,
+    nprobe_step=4,
+    stop: k_and_stable,
+
+run 3:
+    nprobe_start=32,
+    nprobe_step=16,
+    stop: k_and_stable,
+
+run 4:
+    nprobe_start=32,
+    nprobe_step=16,
+    stop: rm_and_k,
+
+run 5:
+    nprobe_start=16,
+    nprobe_step=4,
+    stop: rm_and_k,
+
+run 6:
+    nprobe_start=16,
+    nprobe_step=4,
+    stop: rm_and_k,
+    use faiss_ivf_512.index
+
+run 7:
+    nprobe_start=16,
+    nprobe_step=4,
+    stop: k_and_stable,
+    use faiss_ivf_512.index
+
+run 8 (has best recall): 
+    nprobe_start=32,
+    nprobe_step=16,
+    stop: k_and_stable,
+    use faiss_ivf_512.index
+
