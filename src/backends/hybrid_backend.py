@@ -14,7 +14,7 @@ from src.baselines.hybrid.index import (
 )
 from src.baselines.hybrid.search import hybrid_search
 from src.baselines.hybrid.selector import make_allowlist
-from src.baselines.hybrid.scheduler import linear_nprobe_scheduler
+from src.baselines.hybrid.scheduler import linear_nprobe_scheduler, geometric_nprobe_scheduler
 from src.baselines.hybrid.list_ordering import build_probe_order
 from src.baselines.hybrid.early_stop import get_early_stop_policy
 
@@ -109,10 +109,12 @@ class HybridBackend(SearchBackend):
         if self.ivf_centroids is not None:
             self.n_lists = int(self.ivf_centroids.shape[0])
 
-        # If caller did not specify nprobe_max, default to "all lists"
+        # If caller did not specify nprobe_max, default to a soft cap
+        # so a "no-arg" run doesn't immediately probe the entire index.
         if self._nprobe_max is None:
             if self.n_lists is not None:
-                self._nprobe_max = int(self.n_lists)
+                # Allow probing up to all lists, but cap by default
+                self._nprobe_max = min(int(self.n_lists), 256)
             else:
                 # Fallback if IVF internals are unavailable for some reason
                 self._nprobe_max = 64
@@ -209,7 +211,7 @@ class HybridBackend(SearchBackend):
                 # If anything goes wrong, just fall back silently
                 probe_order = None
 
-        # 4) build a per-query adaptive nprobe scheduler (no magic constants)
+        # 4) build a per-query adaptive nprobe scheduler
         #
         # We adjust the ladder based on filter selectivity, but only by
         # scaling the backend's configured (start, step, max) values.
@@ -222,35 +224,45 @@ class HybridBackend(SearchBackend):
             # degenerate case; treat as unfiltered
             selectivity = 1.0
 
-        # backend defaults (set in __init__)
-        base_start = self._nprobe_start
-        base_step = self._nprobe_step
-        base_max = self._nprobe_max
+        # For mid-selectivity (roughly 1%–40%), use a simpler early-stop policy:
+        # just stop once we have K candidates, like the post-filter baseline.
+        is_mid_band = 0.01 <= selectivity <= 0.40
 
-        # start from the backend defaults
-        nprobe_start = base_start
-        nprobe_step = base_step
-        nprobe_max = base_max
+        # Default to the backend-wide policy, but override in the mid band.
+        effective_early_stop_policy = self._early_stop_policy
+        if is_mid_band:
+            effective_early_stop_policy = get_early_stop_policy("k_only")
+
+        # Backend defaults (set in __init__), sanitized to be consistent.
+        base_start = max(1, int(self._nprobe_start))
+        base_step = max(1, int(self._nprobe_step))
+        base_max = int(self._nprobe_max) if self._nprobe_max is not None else base_start
+        base_max = max(base_start, base_max)
 
         # Scale the nprobe ladder based on selectivity:
         #
-        # - VERY selective (< 1% allowed): scale aggressively (2x) to chase recall.
-        # - Moderately selective (1%–25%): keep the base ladder.
-        # - Weakly selective / unfiltered (>= 25%): scale up moderately (1.5x)
-        #   so IVF can touch more lists before early-stop decides we're "stable".
+        # - VERY selective (< 1% allowed): scale strongly (2.5x) to chase recall.
+        # - Lower mid-band (20%–50%): modest boost (1.75x) to keep latency a bit lower.
+        # - Upper mid-band (50%–80%): stronger boost (2x) where recall can be tricky.
+        # - High-selectivity tail (80%–100%): also boosted (2.25x) to raise tail recall.
+        # - Everything else: keep the base ladder.
         scale = 1.0
         if selectivity < 0.01:
+            scale = 2.5
+        elif 0.20 <= selectivity <= 0.50:
+            scale = 1.75
+        elif 0.50 < selectivity < 0.80:
             scale = 2.0
-        elif selectivity >= 0.25:
-            scale = 1.5
+        elif 0.80 <= selectivity <= 1.0:
+            scale = 2.25
 
-        if scale != 1.0:
-            nprobe_start = max(1, int(base_start * scale))
-            nprobe_step = max(1, int(base_step * scale))
-            nprobe_max = max(nprobe_start, int(base_max * scale))
+        nprobe_start = max(1, int(round(base_start * scale)))
+        nprobe_step = max(1, int(round(base_step * scale)))
+        nprobe_max = max(nprobe_start, int(round(base_max * scale)))
 
         # Never exceed the number of IVF lists in the index
         if self.n_lists is not None:
+            nprobe_start = min(nprobe_start, int(self.n_lists))
             nprobe_max = min(nprobe_max, int(self.n_lists))
 
         # If we know which lists contain at least one allowed id, we can also
@@ -260,12 +272,45 @@ class HybridBackend(SearchBackend):
             if useful_lists > 0:
                 nprobe_max = min(nprobe_max, useful_lists)
 
-        # Finally, build the iterator
-        nprobe_iter = linear_nprobe_scheduler(
-            start=nprobe_start,
-            step=nprobe_step,
-            max_nprobe=nprobe_max,
-        )
+        # For almost-unfiltered queries, avoid over-probing: let early-stop
+        # and the global max handle the tail.
+        if selectivity >= 0.95:
+            nprobe_max = min(nprobe_max, 192)
+
+        # Band-specific caps to fine-tune latency vs recall:
+        # - 0.20–0.50: slightly lower cap to keep latency down.
+        # - 0.50–0.80: larger cap where recall needs more help.
+        # - 0.80–1.00: largest cap (within reason) to lift tail recall.
+        if 0.20 <= selectivity <= 0.50:
+            nprobe_max = min(nprobe_max, 112)
+        elif 0.50 < selectivity < 0.80:
+            nprobe_max = min(nprobe_max, 128)
+        elif 0.80 <= selectivity <= 1.0:
+            nprobe_max = min(nprobe_max, 192)
+
+        # Ensure ladder valid
+        nprobe_max = max(nprobe_max, nprobe_start)
+
+        # Mid-band: single strong probe (post-filter style)
+        if 0.01 <= selectivity <= 0.40:
+            target = max(48, min(nprobe_max, 64))
+            nprobe_iter = iter([int(target)])
+
+        # High selectivity: geometric ramp
+        elif selectivity >= 0.80:
+            nprobe_iter = geometric_nprobe_scheduler(
+                start=nprobe_start,
+                factor=2.0,
+                max_nprobe=nprobe_max,
+            )
+
+        # Default: linear growth
+        else:
+            nprobe_iter = linear_nprobe_scheduler(
+                start=nprobe_start,
+                step=nprobe_step,
+                max_nprobe=nprobe_max,
+            )
 
         # 5) run the predicate-aware ANN loop
         ids, stats = hybrid_search(
@@ -274,7 +319,7 @@ class HybridBackend(SearchBackend):
             allow_ids=allow_ids,
             K=K,
             nprobe_iter=nprobe_iter,
-            early_stop_policy=self._early_stop_policy,
+            early_stop_policy=effective_early_stop_policy,
             global_bound=self._global_bound,
         )
         latency_ms = (time.time() - start) * 1000.0

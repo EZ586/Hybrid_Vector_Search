@@ -99,51 +99,54 @@ def stop_when_k_and_bound(state: SearchState) -> Tuple[bool, Optional[str]]:
 
 def stop_when_k_and_stable(state: SearchState) -> Tuple[bool, Optional[str]]:
     """
-    Stability-based policy: emulate "we are in phase 2".
+    Stability-based policy: emulate "we are in phase 2" with medium conservatism.
 
     Stop when:
       - we have at least K candidates
       - we have run at least `min_probes` probes
-      - we have a history of kth scores
+      - we have a history of kth scores long enough for `window`
+      - we have at least ~1.75K candidates (avoid stopping on a thin set)
       - over the last `window` probes, kth did not improve more than `epsilon`
-
-    Expected state keys:
-      - "K": int
-      - "num_candidates": int
-      - "kth_history": List[float]  (newest at end)
-      - "probe_index": int          (1-based probe counter)
-      - "window": int               (e.g. 3)
-      - "epsilon": float            (e.g. 1e-3)
-      - "min_probes": int           (e.g. 3)
     """
     K = state.get("K")
     num_candidates = state.get("num_candidates", 0)
     kth_history: List[float] = state.get("kth_history") or []
     probe_index: int = state.get("probe_index", 0)
 
-    # Defaults: require at least 3 probes and use a 3-step stability window
-    window: int = state.get("window", 3)
-    epsilon: float = state.get("epsilon", 1e-3)
-    min_probes: int = state.get("min_probes", 3)
-
-    if K is None or num_candidates < K:
+    if K is None:
         return False, None
 
-    # Do not allow early-stop before we've run enough probes
+    if num_candidates < K:
+        return False, None
+
+    # Middle ground defaults:
+    # - more probes than the aggressive version
+    # - shorter window and looser epsilon than the very conservative version
+    window: int = state.get("window", 4)
+    epsilon: float = state.get("epsilon", 5e-4)
+    min_probes: int = state.get("min_probes", 6)
+
+    # Do not allow early-stop before we've run enough probes.
     if probe_index < min_probes:
         return False, None
 
-    # need at least `window` points to judge stability
+    # Require enough candidates so we don't stop on a very thin frontier.
+    min_candidates = max(K, int(1.75 * K))
+    if num_candidates < min_candidates:
+        return False, None
+
+    # Need at least `window` points to judge stability.
     if len(kth_history) < window:
         return False, None
 
-    # compare oldest vs newest in the window
     recent = kth_history[-window:]
     oldest = recent[0]
     newest = recent[-1]
 
-    # if newest is not much better than oldest, we say it's stable
-    if (newest - oldest) <= epsilon:
+    # For similarity scores, higher is better. If the kth score has not
+    # improved by more than epsilon, we treat it as stable.
+    improvement = newest - oldest
+    if improvement <= epsilon:
         return True, "k_and_stable"
 
     return False, None

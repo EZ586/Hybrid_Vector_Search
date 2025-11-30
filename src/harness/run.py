@@ -97,9 +97,11 @@ def get_backend(
         return HybridBackend(
             index_path=str(index_path),
             metadata_dir=str(metadata_dir),
-            nprobe_start=16,
+            # Base ladder: relatively modest start/step; selectivity-aware
+            # scaling inside HybridBackend.search() will boost where needed.
+            nprobe_start=8,
             nprobe_step=4,
-            nprobe_max=None,  # let HybridBackend infer from index.nlist
+            nprobe_max=None,  # let HybridBackend infer and soft-cap from index.nlist
             hybrid_use_ordering=hybrid_use_ordering,
             hybrid_early_stop=hybrid_early_stop,
             hybrid_global_bound=hybrid_global_bound,
@@ -139,7 +141,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--artifacts",
-        default="v1",
+        default="v2",
         choices=["v1", "v2"],
         help="Which artifact bucket under ./artifacts/ to use",
     )
