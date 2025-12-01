@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Tuple, List, Dict, Any, Optional
-import os
 
 import numpy as np
 import faiss
@@ -89,6 +88,17 @@ class HybridBackend(SearchBackend):
             ids: list of up to K ints (padded to K with -1 if needed)
             stats: dict with latency_ms, scored_vectors, lists_probed, nprobe, backend, ...
         """
+
+        # test centroid
+        invlists = self.index.invlists
+        d = self.index.d
+        # Centroids (nlist x dim)
+        centroids = np.vstack([
+            self.index.quantizer.reconstruct(i)
+            for i in range(self.n_lists)
+        ]).astype(np.float32)
+
+
         # 1) build allow_ids from filters; if no filters, allow all
         start=time.time()
         if not filters:
@@ -117,9 +127,11 @@ class HybridBackend(SearchBackend):
 
         # Scale nprobe ladder based on selectivity:
         scale = 1.0
-        if selectivity < 0.01:
-            scale = 2.0
+        if selectivity < 0.30:
+            scale = 20
         elif selectivity >= 0.30 and selectivity <= 0.70:
+            scale = 20
+        if selectivity > 0.70:
             scale = 20
 
         if scale != 1.0:
@@ -134,7 +146,7 @@ class HybridBackend(SearchBackend):
 
         # Finally, build the iterator
         nprobe_iter = linear_nprobe_scheduler(
-            start=nprobe_start,
+            start=1,
             step=nprobe_step,
             max_nprobe=nprobe_max,
         )

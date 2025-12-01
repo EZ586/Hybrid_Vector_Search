@@ -1,54 +1,78 @@
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from pathlib import Path
 
-# === Load JSONL files ===
-df_post = pd.read_json("results/week2/post_results.jsonl", lines=True)
-df_pre = pd.read_json("results/week2/pre_results.jsonl", lines=True)
+def load_results(path):
+    df = pd.read_json(path, lines=True)
+    # Average latency per qid
+    return df.groupby("qid", as_index=False).agg({
+        "filter_selectivity": "first",
+        "latency_ms": "mean"
+    })
 
-# === Average latency per qid ===
-avg_post = df_post.groupby("qid", as_index=False).agg({
-    "filter_selectivity": "first",
-    "latency_ms": "mean"
-})
-avg_pre = df_pre.groupby("qid", as_index=False).agg({
-    "filter_selectivity": "first",
-    "latency_ms": "mean"
-})
+def loess_smooth(df, clip, frac):
+    # Remove outliers
+    df = df[df["latency_ms"] <= clip]
+    return sm.nonparametric.lowess(
+        df["latency_ms"],
+        df["filter_selectivity"],
+        frac=frac
+    )
 
-# === Remove outliers above 40 ms ===
-filtered_post_40 = avg_post[avg_post["latency_ms"] <= 40]
-filtered_pre_40 = avg_pre[avg_pre["latency_ms"] <= 40]
+def main():
+    parser = argparse.ArgumentParser(description="Plot latency vs selectivity for multiple backends.")
+    parser.add_argument("--pre", type=str, default=None, help="Path to pre-filter JSONL results.")
+    parser.add_argument("--post", type=str, default=None, help="Path to post-filter JSONL results.")
+    parser.add_argument("--hybrid", type=str, default=None, help="Path to hybrid JSONL results.")
+    parser.add_argument("--out", type=str, required=True, help="Output PNG file.")
+    parser.add_argument("--clip", type=float, default=40.0, help="Latency cap for outlier removal.")
+    parser.add_argument("--frac", type=float, default=0.3, help="LOESS smoothing fraction.")
+    args = parser.parse_args()
 
-# === Compute LOESS smoothing ===
-smoothed_post_40 = sm.nonparametric.lowess(
-    filtered_post_40["latency_ms"],
-    filtered_post_40["filter_selectivity"],
-    frac=0.3
-)
-smoothed_pre_40 = sm.nonparametric.lowess(
-    filtered_pre_40["latency_ms"],
-    filtered_pre_40["filter_selectivity"],
-    frac=0.3
-)
+    plt.figure(figsize=(8,5))
 
-# === Plot only trend lines ===
-plt.figure(figsize=(8,5))
-plt.plot(smoothed_post_40[:, 0], smoothed_post_40[:, 1],
-         color='red', linewidth=2.5, label="Post Filter")
-plt.plot(smoothed_pre_40[:, 0], smoothed_pre_40[:, 1],
-         color='blue', linewidth=2.5, label="Pre Filter")
-plt.xlabel("Filter Selectivity")
-plt.ylabel("Latency (ms)")
-plt.title("Latency vs Selectivity (Pre vs Post Filter)")
-plt.legend()
-plt.grid(True, linestyle='--', alpha=0.6)
+    # === Pre Filter ===
+    if args.pre:
+        avg_pre = load_results(args.pre)
+        smooth_pre = loess_smooth(avg_pre, args.clip, args.frac)
+        plt.plot(
+            smooth_pre[:,0], smooth_pre[:,1],
+            label="Pre Filter", linewidth=2.5, color="blue"
+        )
 
-# === Export plot ===
-Path("results/week").mkdir(parents=True, exist_ok=True)
-output_path = "results/week2/latency_selectivity.png"
-plt.savefig(output_path, dpi=300, bbox_inches="tight")
-plt.show()
+    # === Post Filter ===
+    if args.post:
+        avg_post = load_results(args.post)
+        smooth_post = loess_smooth(avg_post, args.clip, args.frac)
+        plt.plot(
+            smooth_post[:,0], smooth_post[:,1],
+            label="Post Filter", linewidth=2.5, color="red"
+        )
 
-print(f"Plot saved to: {output_path}")
+    # === Hybrid ===
+    if args.hybrid:
+        avg_hybrid = load_results(args.hybrid)
+        smooth_hybrid = loess_smooth(avg_hybrid, args.clip, args.frac)
+        plt.plot(
+            smooth_hybrid[:,0], smooth_hybrid[:,1],
+            label="Hybrid", linewidth=2.5, color="green", linestyle="--"
+        )
+
+    # === Labels / Formatting ===
+    plt.xlabel("Filter Selectivity")
+    plt.ylabel("Latency (ms)")
+    plt.title("Latency vs Selectivity Across Backends")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # === Save ===
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(args.out, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved plot to: {args.out}")
+
+if __name__ == "__main__":
+    main()
