@@ -1,4 +1,4 @@
-# Title
+# Efficient and Predicate-Aware Hybrid ANN Search for Yelp 
 
 ## Directory Tree
 ```
@@ -80,8 +80,9 @@
 │       ├── logger.py
 │       └── timing.py
 ```
+## Files Description
 
-## 1. Introduction
+### 1. Introduction
 
 
 | Report Section | File | Description |
@@ -91,7 +92,7 @@
 
 ---
 
-## 2. Design and Implementation
+### 2. Design and Implementation
 
 | Report Section | File | Description |
 |---------------|------|-------------|
@@ -105,7 +106,7 @@
 
 ---
 
-## 3. Experimental Setup
+### 3. Experimental Setup
 
 | Report Section | File | Description |
 |---------------|------|-------------|
@@ -116,7 +117,7 @@
 
 ---
 
-## 4. Evaluation
+### 4. Evaluation
 
 | Report Section | File | Description |
 |---------------|------|-------------|
