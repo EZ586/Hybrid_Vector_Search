@@ -1,4 +1,36 @@
-# Efficient and Predicate-Aware Hybrid ANN Search for Yelp 
+# Hybrid Predicate-Aware ANN Search on the Yelp Dataset
+
+This repo packages a full experimental stack for predicate-aware approximate nearest neighbor search: artifacts stores versioned embeddings, metadata, and FAISS index materials that feed the dataio loaders; backends implements exact, pre-, post-, and hybrid FAISS-IVF backends (with `src/baselines/hybrid/*` handling indexing, probing schedules, early stopping, and list ordering) that plug into the run.py benchmarking driver; eval and plots provide recall/latency analytics plus visualization scripts; results captures JSONL experiment logs and persisted indexes; and tests verifies the hybrid search behavior and selector logic.
+
+## **Dependencies & Installation**
+
+This project targets **Python 3.10** and runs **entirely on CPU** (no GPU required).
+All experiments were conducted using the following core libraries:
+
+### **Core Dependencies**
+
+* `faiss-cpu==1.7.4` — IVF index + ANN search
+* `numpy==1.26.*` — vector operations
+* `pandas==2.1.*` — metadata + query handling
+* `pyarrow==13.*` — Parquet / columnar data
+* `sentence-transformers==2.2.*` — query embeddings
+* `matplotlib==3.8.*` — plotting
+* `statsmodels==0.14.*` — LOESS smoothing
+
+## **Installation**
+
+You can install dependencies manually:
+
+```bash
+pip install \
+  "faiss-cpu==1.7.4" \
+  "numpy==1.26.*" \
+  "pandas==2.1.*" \
+  "pyarrow==13.*" \
+  "sentence-transformers==2.2.*" \
+  "matplotlib==3.8.*" \
+  "statsmodels==0.14.*"
+```
 
 ## Directory Tree
 ```
