@@ -83,12 +83,14 @@
 
 Description Tables
 
-2.2 Baseline Approaches
+Table 1
+
+2.2 Baseline Approaches 
 Baselines (pre and post only)
 
-3 DESIGN AND IMPLEMENTATION
+Table 2
 
-hybrid
+3 DESIGN AND IMPLEMENTATION 
 
 3.1 Architectural Overview (scheduler.py and selector.py)
 
@@ -102,14 +104,18 @@ hybrid
 
 3.3 Query filtering and allow-list construction (hybrid backend)
 
-4.2 Dataset and workload
+Table 3
+
+4.2 Dataset and workload 
 Artifacts (Do not need to do v1)
 
 4.4 Metrics (metrics.py)
 
+
+Table 4
+
 5.1 Results
 Plots ()
-Results (only do indexes and week7 folder)
 
 
 
