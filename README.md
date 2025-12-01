@@ -127,7 +127,7 @@
 | 4.1 Results | `plots/selectivity_sv_v2.py` | Visualizes **selectivity vs scored vectors** for post-filter and hybrid search. |
 | 4.1 Results | `src/harness/run.py` | CLI for running experiments with chosen search type and nprobe; outputs JSON stats. |
 
-Building Artifacts (v2)
+### Building Artifacts (v2)
 
 Artifacts (vectors, metadata, and query embeddings) are generated using:
 
@@ -146,7 +146,7 @@ queries.parquet
 
 query_vectors.npy
 
-Building the IVF Index
+## Building the IVF Index
 
 We build a FAISS IVF-Flat index with nlist = 1024:
 
@@ -155,30 +155,30 @@ python -m src.index.build_ivf \
     --nlist 1024 \
     --out results/indexes/faiss_ivf.index
 
-Running the Harness
+## Running the Harness
 
 All backends are invoked through the unified harness.
 
-Pre-Filter Backend
+## Pre-Filter Backend
 python -m src.harness.run \
     --backend pre_filter \
     --K 10 \
     --out results/pre_results.jsonl
 
-Post-Filter Backend
+## Post-Filter Backend
 python -m src.harness.run \
     --backend post_filter \
     --K 10 \
     --out results/post_results.jsonl
 
-Hybrid Backend
+## Hybrid Backend
 python -m src.harness.run \
     --backend hybrid \
     --K 10 \
     --hybrid-early-stop k_and_stable \
     --out results/hybrid_results.jsonl
 
-Plotting Scripts
+## Plotting Scripts
 
 Each plot is generated through standalone modules in plots/.
 
