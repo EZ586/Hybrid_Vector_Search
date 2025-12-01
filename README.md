@@ -89,10 +89,15 @@ Baselines (pre and post only)
 3 DESIGN AND IMPLEMENTATION
 
 hybrid
+
 3.1 Architectural Overview (scheduler.py and selector.py)
+
 3.2 Indexing (index.py)
+
 3.4 Hybrid search algorithm (search.py)
+
 3.5 List ordering and per-list counts (list_ordering.py)
+
 3.6 Early stop policies (early_stop.py)
 
 3.3 Query filtering and allow-list construction (hybrid backend)
