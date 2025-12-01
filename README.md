@@ -130,14 +130,14 @@
 ### Building Artifacts (v2)
 
 Artifacts (vectors, metadata, and query embeddings) are generated using:
-
+```
 python -m src.artifacts.artifacts --out artifacts/v2
 python -m src.artifacts.make_queries --out artifacts/v2
 python -m src.artifacts.make_query_vectors --out artifacts/v2
-
+```
 
 These commands produce:
-
+```
 vectors.npy
 
 metadata.parquet
@@ -145,54 +145,60 @@ metadata.parquet
 queries.parquet
 
 query_vectors.npy
-
+```
 ## Building the IVF Index
 
 We build a FAISS IVF-Flat index with nlist = 1024:
-
+```
 python -m src.index.build_ivf \
     --vectors artifacts/v2/vectors.npy \
     --nlist 1024 \
     --out results/indexes/faiss_ivf.index
-
+```
 ## Running the Harness
 
 All backends are invoked through the unified harness.
 
 ## Pre-Filter Backend
+```
 python -m src.harness.run \
     --backend pre_filter \
     --K 10 \
     --out results/pre_results.jsonl
-
+```
 ## Post-Filter Backend
+```
 python -m src.harness.run \
     --backend post_filter \
     --K 10 \
     --out results/post_results.jsonl
-
+```
 ## Hybrid Backend
+```
 python -m src.harness.run \
     --backend hybrid \
     --K 10 \
     --hybrid-early-stop k_and_stable \
     --out results/hybrid_results.jsonl
-
+```
 ## Plotting Scripts
 
 Each plot is generated through standalone modules in plots/.
 
 Latency vs. Selectivity
+```
 python -m plots.selectivity_latency
-
+```
 Recall vs. Selectivity
+```
 python -m plots.selectivity_recall
-
+```
 Scored Vectors vs. Selectivity
+```
 python -m plots.selectivity_sv_v1
-
+```
 Scored Vectors (Hybrid vs. Post)
+```
 python -m plots.selectivity_sv_v2
-
-
+```
 
